@@ -111,7 +111,9 @@ DEFAULT_RENDER_CRF = 28
 DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_CLIP_PADDING = 2.5
-MAX_SELECTED_SEGMENTS = 6
+DEFAULT_TARGET_RETENTION_RATIO = 0.30
+MAX_SELECTED_SEGMENTS = 10
+TARGET_SEGMENT_SECONDS = 24.0
 HIGHLIGHT_SCORE_RATIO = 0.72
 MIN_HIGHLIGHT_SCORE = 4.5
 HARD_DURATION_EXTRA_SEC = 30.0
@@ -1374,10 +1376,23 @@ def too_visually_similar(candidate: dict[str, Any], existing: dict[str, Any]) ->
     return center_gap < 90 or similarity >= 0.82
 
 
+def resolve_target_duration(source_duration: float, requested_target: Optional[float], retention_ratio: float = DEFAULT_TARGET_RETENTION_RATIO) -> float:
+    if requested_target is not None:
+        return max(1.0, float(requested_target))
+    return round(max(1.0, source_duration * max(0.0, retention_ratio)), 3)
+
+
+def max_segments_for_target(target_duration: float) -> int:
+    expected_padded_segment_seconds = TARGET_SEGMENT_SECONDS + DEFAULT_CLIP_PADDING * 2
+    dynamic_count = int((target_duration + expected_padded_segment_seconds - 0.001) // expected_padded_segment_seconds)
+    return max(3, min(MAX_SELECTED_SEGMENTS, dynamic_count))
+
+
 def select_segments(scored: list[dict[str, Any]], target_duration: float) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     total = 0.0
     hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    max_selected = max_segments_for_target(target_duration)
     subclip_duration = sum(item["duration_sec"] for item in scored if item.get("signals", {}).get("candidate_type") == "subclip")
     prefer_subclips = subclip_duration >= target_duration * 0.8
     pool = [
@@ -1406,7 +1421,7 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
             continue
         selected.append(candidate)
         total += candidate["duration_sec"]
-        if len(selected) >= MAX_SELECTED_SEGMENTS:
+        if len(selected) >= max_selected:
             break
     return sorted(selected, key=lambda item: item["start"])
 
@@ -1431,10 +1446,16 @@ def padded_segment_bounds(selected: list[dict[str, Any]], source_duration: float
     return [(round(start, 3), round(end, 3)) for start, end in bounds]
 
 
-def build_edit_plan(out_dir: Path, target_duration: float, clip_padding: float = DEFAULT_CLIP_PADDING) -> dict[str, Any]:
+def build_edit_plan(
+    out_dir: Path,
+    target_duration: Optional[float],
+    clip_padding: float = DEFAULT_CLIP_PADDING,
+    retention_ratio: float = DEFAULT_TARGET_RETENTION_RATIO,
+) -> dict[str, Any]:
     source = read_json(out_dir / "source.json")
     scored = read_json(out_dir / "scored_segments.json")
-    selected = select_segments(scored, target_duration)
+    resolved_target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), target_duration, retention_ratio)
+    selected = select_segments(scored, resolved_target_duration)
     padded_bounds = padded_segment_bounds(selected, float(source.get("duration_sec", 0.0)), max(0.0, clip_padding))
     segments = []
     for index, item in enumerate(selected):
@@ -1459,7 +1480,9 @@ def build_edit_plan(out_dir: Path, target_duration: float, clip_padding: float =
         "version": "edit_plan_v1",
         "source_video": source["source_video"],
         "output_video": str((out_dir / "output" / "highlight.mp4").resolve()),
-        "target_duration_sec": target_duration,
+        "target_duration_sec": resolved_target_duration,
+        "target_duration_source": "explicit" if target_duration is not None else "source_retention_ratio",
+        "target_retention_ratio": retention_ratio,
         "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
         "selected_segments": segments,
     }
@@ -1562,6 +1585,8 @@ def command_prepare(args: argparse.Namespace) -> None:
 
 def command_score(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
+    source = read_json(out_dir / "source.json")
+    target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), args.target_duration, args.retention_ratio)
     candidates = read_json(out_dir / "candidates.json")
     candidates = attach_visual_signals(candidates, load_visual_signals(out_dir))
     project_focus = infer_project_focus(candidates)
@@ -1569,7 +1594,7 @@ def command_score(args: argparse.Namespace) -> None:
     candidates = attach_focus_signals(candidates, project_focus)
     scored = score_candidates(candidates, args.planner, args.model)
     write_json(out_dir / "scored_segments.json", scored)
-    write_project_summary(out_dir, args.target_duration)
+    write_project_summary(out_dir, target_duration)
     log(f"Wrote {len(scored)} scored segments to {out_dir / 'scored_segments.json'}")
 
 
@@ -1586,9 +1611,9 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
 
 def command_plan(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
-    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding)
+    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio)
     write_json(out_dir / "edit_plan.json", plan)
-    write_project_summary(out_dir, args.target_duration)
+    write_project_summary(out_dir, plan["target_duration_sec"])
     log(f"Wrote edit plan with {len(plan['selected_segments'])} segments to {out_dir / 'edit_plan.json'}")
 
 
@@ -1616,9 +1641,20 @@ def command_run(args: argparse.Namespace) -> None:
                 ollama_url=args.ollama_url,
             )
         )
-    score_args = argparse.Namespace(work_dir=args.out, planner=args.planner, model=args.model, target_duration=args.target_duration)
+    score_args = argparse.Namespace(
+        work_dir=args.out,
+        planner=args.planner,
+        model=args.model,
+        target_duration=args.target_duration,
+        retention_ratio=args.retention_ratio,
+    )
     command_score(score_args)
-    plan_args = argparse.Namespace(work_dir=args.out, target_duration=args.target_duration, clip_padding=args.clip_padding)
+    plan_args = argparse.Namespace(
+        work_dir=args.out,
+        target_duration=args.target_duration,
+        clip_padding=args.clip_padding,
+        retention_ratio=args.retention_ratio,
+    )
     command_plan(plan_args)
     command_render(
         argparse.Namespace(
@@ -1646,7 +1682,8 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("work_dir", help="Work directory")
     score.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
     score.add_argument("--model", default="qwen3:6b", help="Ollama model")
-    score.add_argument("--target-duration", type=float, default=180)
+    score.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
+    score.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     score.set_defaults(func=command_score)
 
     analyze_visuals_parser = subparsers.add_parser("analyze-visuals", help="Extract thumbnails and visual/OCR metadata for candidates")
@@ -1659,7 +1696,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="Create edit_plan.json from scored segments")
     plan.add_argument("work_dir", help="Work directory")
-    plan.add_argument("--target-duration", type=float, default=180)
+    plan.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
+    plan.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     plan.set_defaults(func=command_plan)
 
@@ -1675,7 +1713,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Run the full pipeline")
     run.add_argument("input", help="Input video path")
     run.add_argument("--out", required=True, help="Work directory")
-    run.add_argument("--target-duration", type=float, default=180)
+    run.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
+    run.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     run.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
     run.add_argument("--model", default="qwen3:6b", help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")

@@ -310,6 +310,15 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in selected], ["a", "b"])
 
+    def test_resolve_target_duration_defaults_to_source_retention(self):
+        self.assertEqual(ah.resolve_target_duration(180, None), 54)
+        self.assertEqual(ah.resolve_target_duration(600, None), 180)
+        self.assertEqual(ah.resolve_target_duration(600, 90), 90)
+
+    def test_max_segments_scales_with_dynamic_target(self):
+        self.assertLess(ah.max_segments_for_target(54), ah.max_segments_for_target(180))
+        self.assertLessEqual(ah.max_segments_for_target(600), ah.MAX_SELECTED_SEGMENTS)
+
     def test_select_segments_prefers_subclips_when_available(self):
         scored = [
             {"id": "long", "start": 0, "end": 60, "duration_sec": 60, "final_score": 10, "is_standalone": True, "avoid_reason": "none", "signals": {}},
@@ -441,6 +450,8 @@ class AutoHighlightTests(unittest.TestCase):
         args = parser.parse_args(["plan", "work/sample_video"])
 
         self.assertEqual(args.clip_padding, 2.5)
+        self.assertIsNone(args.target_duration)
+        self.assertEqual(args.retention_ratio, 0.3)
 
     def test_render_defaults_compress_to_phone_resolution(self):
         parser = ah.build_parser()
