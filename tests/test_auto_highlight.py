@@ -179,6 +179,57 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("marine_mammal", terms)
         self.assertIn("aquarium", terms)
 
+    def test_vision_summary_majority_votes_normalized_subjects(self):
+        summary = ah.summarize_vision_captions(
+            [
+                {"description": "A seal swims near glass.", "subjects": ["seal"], "setting": "aquarium"},
+                {"description": "A sea lion surfaces in an exhibit.", "subjects": ["sea lion"], "setting": "aquarium"},
+                {"description": "A turtle is partly visible in water.", "subjects": ["turtle"], "setting": "aquarium"},
+            ]
+        )
+
+        self.assertIn("marine_mammal", summary["stable_subjects"])
+        self.assertEqual(summary["subject_counts"]["marine_mammal"], 2)
+        self.assertIn("aquatic_animal", summary["unstable_subjects"])
+
+    def test_project_focus_downweights_one_off_subjects(self):
+        candidates = [
+            {
+                "id": "seg_001",
+                "transcript": "",
+                "signals": {
+                    "vision": {
+                        "summary": {
+                            "subjects": ["dolphin"],
+                            "normalized_subjects": ["marine_mammal"],
+                            "subject_counts": {"marine_mammal": 1},
+                            "description": "A dolphin-like animal in an aquarium.",
+                        }
+                    }
+                },
+            },
+            {
+                "id": "seg_002",
+                "transcript": "",
+                "signals": {
+                    "vision": {
+                        "summary": {
+                            "subjects": ["water"],
+                            "normalized_subjects": [],
+                            "subject_counts": {},
+                            "description": "Water and rocks in an exhibit.",
+                        }
+                    }
+                },
+            },
+        ]
+
+        focus = ah.infer_project_focus(candidates)
+        marine = next(item for item in focus["focus_terms"] if item["term"] == "marine_mammal")
+
+        self.assertLess(marine["weight"], 6)
+        self.assertEqual(marine["candidate_support"], 1)
+
     def test_focus_signal_increases_score_and_tags_candidate(self):
         base_candidate = {
             "id": "seg_001",
@@ -275,6 +326,51 @@ class AutoHighlightTests(unittest.TestCase):
         selected = ah.select_segments(scored, target_duration=60)
 
         self.assertEqual([item["id"] for item in selected], ["a", "b", "c"])
+
+    def test_select_segments_skips_visually_similar_scenes(self):
+        def candidate(candidate_id, start, score, description):
+            return {
+                "id": candidate_id,
+                "start": start,
+                "end": start + 20,
+                "duration_sec": 20,
+                "final_score": score,
+                "is_standalone": True,
+                "avoid_reason": "none",
+                "signals": {
+                    "vision": {
+                        "summary": {
+                            "description": description,
+                            "normalized_subjects": ["marine_mammal"],
+                            "stable_subjects": ["marine_mammal"],
+                            "settings": ["aquarium"],
+                        }
+                    }
+                },
+            }
+
+        scored = [
+            candidate("a", 0, 9, "A seal swims in a rocky aquarium enclosure."),
+            candidate("b", 45, 8, "A sea lion swims in the same rocky aquarium enclosure."),
+            candidate("c", 120, 7, "People react beside a bright outdoor sign and entrance."),
+        ]
+
+        selected = ah.select_segments(scored, target_duration=45)
+
+        self.assertEqual([item["id"] for item in selected], ["a", "c"])
+
+    def test_split_long_candidate_marks_event_windows(self):
+        candidate = ah.Candidate("seg_000", 0, 70, " ".join(["普通對話"] * 4), {})
+        segments = [
+            {"start": 2, "end": 5, "text": "普通對話"},
+            {"start": 30, "end": 34, "text": "哇 你看 牠游過來了！"},
+            {"start": 55, "end": 58, "text": "普通對話"},
+        ]
+
+        splits = ah.split_long_candidate(candidate, segments, duration=70)
+
+        self.assertTrue(any(item.signals.get("split_reason") == "transcript_event" for item in splits))
+        self.assertTrue(any(item.start <= 30 <= item.end for item in splits))
 
     def test_build_edit_plan_uses_scored_segments(self):
         with tempfile.TemporaryDirectory() as directory:

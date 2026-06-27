@@ -56,7 +56,8 @@ OCR_PLACE_WORDS = ["入口", "出口", "駅", "站", "公園", "水族館", "動
 VISION_PLACE_WORDS = ["aquarium", "zoo", "park", "station", "market", "restaurant", "temple", "museum", "水族館", "動物園", "公園", "車站", "市場", "餐廳"]
 VISION_INTEREST_WORDS = ["animal", "crowd", "performance", "reaction", "close-up", "landmark", "動物", "人群", "表演", "反應", "特寫", "地標"]
 FOCUS_ALIAS_GROUPS = {
-    "marine_mammal": ["marine mammal", "seal", "sea lion", "walrus", "海豹", "海獅", "海象", "海洋動物"],
+    "marine_mammal": ["marine mammal", "seal", "sea lion", "walrus", "dolphin", "whale", "海豹", "海獅", "海象", "海豚", "鯨", "海洋動物"],
+    "aquatic_animal": ["aquatic animal", "marine animal", "sea animal", "turtle", "fish", "水生動物", "海洋生物", "海龜", "魚"],
     "aquarium": ["aquarium", "marine exhibit", "marine park", "aquatic enclosure", "水族館", "海洋館", "海生館"],
     "animal": ["animal", "animals", "動物"],
     "landmark": ["landmark", "temple", "museum", "地標", "寺", "廟", "博物館"],
@@ -66,6 +67,7 @@ FOCUS_ALIAS_GROUPS = {
 }
 FOCUS_DISPLAY_NAMES = {
     "marine_mammal": "海洋動物",
+    "aquatic_animal": "水生動物",
     "aquarium": "水族館場景",
     "animal": "動物",
     "landmark": "地標",
@@ -92,6 +94,11 @@ FOCUS_GENERIC_TERMS = {
     "rock",
     "rocks",
     "railing",
+    "metal railing",
+    "fence",
+    "net",
+    "netting",
+    "barrier",
     "platform",
     "roof",
     "structure",
@@ -441,23 +448,54 @@ def split_long_candidate(
 ) -> list[Candidate]:
     if candidate.duration < 32:
         return []
-    splits: list[Candidate] = []
+    windows: list[tuple[float, float, float, str]] = []
+    utterances = [seg for seg in segments if seg["end"] > candidate.start and seg["start"] < candidate.end and seg.get("text")]
+    for utterance in utterances:
+        text = utterance["text"]
+        score = (
+            len(text_hits(text, KEYWORDS)) * 2.5
+            + len(text_hits(text, EMOTION_WORDS)) * 1.5
+            + len(text_hits(text, PLACE_WORDS)) * 0.8
+            + sum(text.count(ch) for ch in ("?", "？", "!", "！")) * 0.8
+            + 0.4
+        )
+        center = (utterance["start"] + utterance["end"]) / 2
+        start = max(candidate.start, center - target_duration / 2)
+        end = min(candidate.end, start + target_duration)
+        start = max(candidate.start, end - target_duration)
+        windows.append((score, start, end, "transcript_event"))
+
     cursor = candidate.start
     while cursor + 12 <= candidate.end:
         end = min(candidate.end, cursor + target_duration)
         if candidate.end - end < 8:
             end = candidate.end
-        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", cursor, end, segments, duration)
+        windows.append((0.2, cursor, end, "even_window"))
+        if end >= candidate.end:
+            break
+        cursor += step
+
+    ordered_windows: list[tuple[float, float, float, str]] = []
+    for score, start, end, reason in sorted(windows, key=lambda item: item[0], reverse=True):
+        if end - start < 12:
+            continue
+        if any(max(0.0, min(end, used_end) - max(start, used_start)) / max(1.0, min(end - start, used_end - used_start)) > 0.55 for _, used_start, used_end, _ in ordered_windows):
+            continue
+        ordered_windows.append((score, start, end, reason))
+    ordered_windows.sort(key=lambda item: item[1])
+
+    splits: list[Candidate] = []
+    for score, start, end, reason in ordered_windows:
+        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", start, end, segments, duration)
         if split and split.duration >= 12:
             signals = {
                 **split.signals,
                 "candidate_type": "subclip",
                 "parent_candidate_id": candidate.id,
+                "split_reason": reason,
+                "split_event_score": round(score, 3),
             }
             splits.append(Candidate(split.id, split.start, split.end, split.transcript, signals))
-        if end >= candidate.end:
-            break
-        cursor += step
     return splits
 
 
@@ -725,19 +763,40 @@ def describe_thumbnail_with_ollama(image_path: Path, model: str, ollama_url: str
 def summarize_vision_captions(captions: list[dict[str, Any]]) -> dict[str, Any]:
     descriptions = [caption.get("description", "") for caption in captions if caption.get("description")]
     subjects: list[str] = []
+    normalized_subjects: list[str] = []
     actions: list[str] = []
     hooks: list[str] = []
     settings: list[str] = []
     for caption in captions:
-        subjects.extend(str(item) for item in caption.get("subjects", []) if item)
+        caption_subjects = [str(item) for item in caption.get("subjects", []) if item]
+        subjects.extend(caption_subjects)
+        caption_text = " ".join(
+            [
+                caption.get("description", ""),
+                caption.get("setting", ""),
+                caption.get("visual_hook", ""),
+                " ".join(caption_subjects),
+            ]
+        )
+        caption_focuses = set(canonical_focus_hits(caption_text))
+        caption_focuses.update(normalize_focus_subject(subject) for subject in caption_subjects)
+        normalized_subjects.extend(focus for focus in caption_focuses if focus)
         actions.extend(str(item) for item in caption.get("actions", []) if item)
         if caption.get("visual_hook"):
             hooks.append(str(caption["visual_hook"]))
         if caption.get("setting"):
             settings.append(str(caption["setting"]))
+    subject_counts = Counter(normalized_subjects)
+    stable_threshold = 2 if len(captions) >= 3 else 1
+    stable_subjects = [subject for subject, count in subject_counts.most_common() if count >= stable_threshold]
+    unstable_subjects = [subject for subject, count in subject_counts.most_common() if count < stable_threshold]
     return {
         "description": " ".join(descriptions[:3]),
         "subjects": sorted(set(subjects)),
+        "normalized_subjects": stable_subjects or [subject for subject, _ in subject_counts.most_common()],
+        "subject_counts": dict(subject_counts.most_common()),
+        "stable_subjects": stable_subjects,
+        "unstable_subjects": unstable_subjects,
         "actions": sorted(set(actions)),
         "settings": sorted(set(settings)),
         "visual_hooks": hooks[:3],
@@ -763,6 +822,18 @@ def quality_penalty_from_visuals(quality: dict[str, float]) -> float:
     if sharpness < 0.025:
         penalty += 0.8
     return round(penalty, 3)
+
+
+def visual_event_score_from_summary(summary: dict[str, Any]) -> float:
+    subject_counts = summary.get("subject_counts", {})
+    repeated_subjects = 0
+    if isinstance(subject_counts, dict):
+        repeated_subjects = sum(1 for count in subject_counts.values() if isinstance(count, (int, float)) and count >= 2)
+    action_count = len(listify(summary.get("actions")))
+    hook_count = len(listify(summary.get("visual_hooks")))
+    stable_count = len(listify(summary.get("stable_subjects")))
+    raw_subject_count = len(listify(summary.get("subjects")))
+    return min(10.0, stable_count * 2.5 + repeated_subjects * 2.0 + min(2, action_count) * 1.0 + min(2, hook_count) * 0.8 + min(1, raw_subject_count) * 0.7)
 
 
 def analyze_candidate_visuals(
@@ -880,6 +951,8 @@ def vision_summary_text(summary: dict[str, Any]) -> str:
         summary.get("visual_hook", ""),
         summary.get("quality_note", ""),
         " ".join(listify(summary.get("subjects"))),
+        " ".join(listify(summary.get("normalized_subjects"))),
+        " ".join(listify(summary.get("stable_subjects"))),
         " ".join(listify(summary.get("settings"))),
         " ".join(listify(summary.get("actions"))),
         " ".join(listify(summary.get("visual_hooks"))),
@@ -913,39 +986,65 @@ def normalize_focus_subject(subject: str) -> str:
 def infer_project_focus(candidates: list[dict[str, Any]], max_terms: int = 6) -> dict[str, Any]:
     counts: Counter[str] = Counter()
     sources: dict[str, set[str]] = {}
+    candidate_support: dict[str, set[str]] = {}
     for candidate in candidates:
         signals = candidate.get("signals", {})
         summary = signals.get("vision", {}).get("summary", {})
+        candidate_id = candidate.get("id", "")
+        for subject in listify(summary.get("stable_subjects")) or listify(summary.get("normalized_subjects")):
+            focus = normalize_focus_subject(subject)
+            if focus:
+                counts[focus] += 4
+                sources.setdefault(focus, set()).add("vision_subject")
+                candidate_support.setdefault(focus, set()).add(candidate_id)
+        subject_counts = summary.get("subject_counts", {})
+        if isinstance(subject_counts, dict):
+            for subject, support in subject_counts.items():
+                focus = normalize_focus_subject(str(subject))
+                if focus:
+                    counts[focus] += min(3.0, float(support))
+                    sources.setdefault(focus, set()).add("vision_majority")
+                    candidate_support.setdefault(focus, set()).add(candidate_id)
         for subject in listify(summary.get("subjects")):
             focus = normalize_focus_subject(subject)
             if focus:
-                counts[focus] += 3
-                sources.setdefault(focus, set()).add("vision_subject")
+                counts[focus] += 1
+                sources.setdefault(focus, set()).add("vision_subject_raw")
+                candidate_support.setdefault(focus, set()).add(candidate_id)
         visual_text = vision_summary_text(summary)
         for focus in canonical_focus_hits(visual_text):
             counts[focus] += 2
             sources.setdefault(focus, set()).add("vision_text")
+            candidate_support.setdefault(focus, set()).add(candidate_id)
         ocr_text = signals.get("ocr", {}).get("text", "")
         for focus in canonical_focus_hits(ocr_text):
             counts[focus] += 1
             sources.setdefault(focus, set()).add("ocr")
+            candidate_support.setdefault(focus, set()).add(candidate_id)
         transcript = candidate.get("transcript", "")
         for focus in canonical_focus_hits(transcript):
             counts[focus] += 1
             sources.setdefault(focus, set()).add("transcript")
+            candidate_support.setdefault(focus, set()).add(candidate_id)
 
     focus_terms = []
     for term, count in counts.most_common(max_terms):
         if count <= 0:
+            continue
+        support_count = len(candidate_support.get(term, set()))
+        if support_count <= 1 and term not in FOCUS_ALIAS_GROUPS:
+            continue
+        if support_count <= 1 and count < 5:
             continue
         aliases = FOCUS_ALIAS_GROUPS.get(term, [term])
         focus_terms.append(
             {
                 "term": term,
                 "display": FOCUS_DISPLAY_NAMES.get(term, term),
-                "weight": round(min(10.0, float(count)), 3),
+                "weight": round(min(10.0, float(count) * (1.0 if support_count > 1 else 0.45)), 3),
                 "aliases": aliases,
                 "sources": sorted(sources.get(term, set())),
+                "candidate_support": support_count,
             }
         )
     return {
@@ -967,6 +1066,25 @@ def candidate_focus_text(candidate: dict[str, Any]) -> str:
     )
 
 
+def candidate_subject_support(candidate: dict[str, Any], term: str) -> int:
+    summary = candidate.get("signals", {}).get("vision", {}).get("summary", {})
+    subject_counts = summary.get("subject_counts", {})
+    if isinstance(subject_counts, dict):
+        direct = subject_counts.get(term)
+        if direct is not None:
+            try:
+                return int(direct)
+            except (TypeError, ValueError):
+                return 0
+    stable_subjects = listify(summary.get("stable_subjects"))
+    normalized_subjects = listify(summary.get("normalized_subjects"))
+    if term in stable_subjects:
+        return 2
+    if term in normalized_subjects:
+        return 1
+    return 0
+
+
 def attach_focus_signals(candidates: list[dict[str, Any]], project_focus: dict[str, Any]) -> list[dict[str, Any]]:
     enriched = []
     focus_terms = project_focus.get("focus_terms", [])
@@ -977,14 +1095,22 @@ def attach_focus_signals(candidates: list[dict[str, Any]], project_focus: dict[s
         for item in focus_terms:
             aliases = item.get("aliases") or [item.get("term", "")]
             if any(str(alias).lower() in text for alias in aliases if str(alias).strip()):
+                support = candidate_subject_support(candidate, str(item.get("term", "")))
+                project_support = int(item.get("candidate_support", 1) or 1)
+                support_multiplier = 1.0
+                if support == 1 and project_support <= 1:
+                    support_multiplier = 0.35
+                elif support == 1:
+                    support_multiplier = 0.65
                 matched.append(
                     {
                         "term": item.get("term", ""),
                         "display": item.get("display", item.get("term", "")),
                         "weight": item.get("weight", 0.0),
+                        "support": support,
                     }
                 )
-                score += float(item.get("weight", 0.0)) * 0.7
+                score += float(item.get("weight", 0.0)) * 0.7 * support_multiplier
         signals = {
             **candidate.get("signals", {}),
             "focus": {
@@ -1017,6 +1143,7 @@ def heuristic_scores(candidate: dict[str, Any]) -> dict[str, float]:
     place_score = min(10.0, len(signals.get("place_words", [])) * 2.5 + len(ocr_place_hits) * 2.0 + len(vision_place_hits) * 1.5)
     emotion_score = min(10.0, len(signals.get("emotion_words", [])) * 2.5 + signals.get("question_exclamation_count", 0))
     visual_interest_score = min(10.0, len(vision_interest_hits) * 1.5)
+    visual_event_score = visual_event_score_from_summary(vision_summary)
     focus_score = min(10.0, float(signals.get("focus", {}).get("score", 0.0)))
     quality_penalty = (1.0 if candidate["duration_sec"] < 12 else 0.0) + float(signals.get("visual_quality_penalty", 0.0))
     total = (
@@ -1024,7 +1151,7 @@ def heuristic_scores(candidate: dict[str, Any]) -> dict[str, float]:
         + speech_density_score * 0.15
         + interaction_score * 0.2
         + place_score * 0.15
-        + max(emotion_score, visual_interest_score) * 0.15
+        + max(emotion_score, visual_interest_score, visual_event_score) * 0.15
         + focus_score * 0.2
         - quality_penalty
     )
@@ -1035,6 +1162,7 @@ def heuristic_scores(candidate: dict[str, Any]) -> dict[str, float]:
         "place_score": round(place_score, 3),
         "emotion_score": round(emotion_score, 3),
         "visual_interest_score": round(visual_interest_score, 3),
+        "visual_event_score": round(visual_event_score, 3),
         "focus_score": round(focus_score, 3),
         "quality_penalty": round(quality_penalty, 3),
         "total_heuristic_score": round(max(0.0, total), 3),
@@ -1176,6 +1304,70 @@ def overlap_ratio(left: dict[str, Any], right: dict[str, Any]) -> float:
     return overlap / max(1.0, min(left["duration_sec"], right["duration_sec"]))
 
 
+SCENE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "the",
+    "of",
+    "with",
+    "in",
+    "on",
+    "at",
+    "to",
+    "is",
+    "are",
+    "appears",
+    "image",
+    "shows",
+    "scene",
+    "view",
+    "water",
+    "glass",
+    "clear",
+    "blue",
+    "greenish",
+}
+
+
+def scene_tokens(candidate: dict[str, Any]) -> set[str]:
+    summary = candidate.get("signals", {}).get("vision", {}).get("summary", {})
+    text = " ".join(
+        [
+            " ".join(listify(summary.get("stable_subjects"))),
+            " ".join(listify(summary.get("normalized_subjects"))),
+            " ".join(listify(summary.get("settings"))),
+            summary.get("description", ""),
+        ]
+    ).lower()
+    tokens = set(canonical_focus_hits(text))
+    for token in re.findall(r"[a-z0-9\u4e00-\u9fff]+", text):
+        if len(token) < 3 and not re.search(r"[\u4e00-\u9fff]", token):
+            continue
+        if token in SCENE_STOPWORDS:
+            continue
+        normalized = normalize_focus_subject(token) or token
+        if normalized not in FOCUS_GENERIC_TERMS:
+            tokens.add(normalized)
+    return tokens
+
+
+def scene_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_tokens = scene_tokens(left)
+    right_tokens = scene_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def too_visually_similar(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
+    similarity = scene_similarity(candidate, existing)
+    if similarity < 0.58:
+        return False
+    center_gap = abs(((candidate["start"] + candidate["end"]) / 2) - ((existing["start"] + existing["end"]) / 2))
+    return center_gap < 90 or similarity >= 0.82
+
+
 def select_segments(scored: list[dict[str, Any]], target_duration: float) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     total = 0.0
@@ -1195,6 +1387,8 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
         if any(overlap_ratio(candidate, existing) > 0.2 for existing in selected):
             continue
         if any(abs(candidate["start"] - existing["start"]) < 4 for existing in selected):
+            continue
+        if any(too_visually_similar(candidate, existing) for existing in selected):
             continue
         if selected and total + candidate["duration_sec"] > budget:
             continue
