@@ -433,6 +433,125 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(plan["selected_segments"][0]["source_end"], 32.5)
         self.assertEqual(plan["selected_segments"][0]["original_source_start"], 5)
 
+    def test_build_review_report_explains_selected_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 30,
+                    "selected_duration_sec": 25,
+                    "selected_segments": [
+                        {
+                            "segment_id": "seg_001",
+                            "role": "hook",
+                            "source_start": 5,
+                            "source_end": 30,
+                            "duration_sec": 25,
+                            "original_source_start": 7,
+                            "original_source_end": 28,
+                            "title": "海豹靠近",
+                            "reason": "海豹貼近玻璃",
+                            "final_score": 8.4,
+                        }
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {
+                        "id": "seg_001",
+                        "start": 7,
+                        "end": 28,
+                        "duration_sec": 21,
+                        "title": "海豹靠近",
+                        "summary": "海豹游到玻璃前",
+                        "transcript": "哇 你看牠過來了",
+                        "tags": ["反應", "主體重點"],
+                        "scores": {"hook": 9, "focus": 7},
+                        "heuristic_scores": {"focus_score": 7},
+                        "final_score": 8.4,
+                        "avoid_reason": "none",
+                        "scoring_source": "heuristic",
+                        "signals": {
+                            "keywords": ["你看"],
+                            "emotion_words": ["哇"],
+                            "place_words": [],
+                            "thumbnails": [
+                                {"time": 9, "path": "thumbnails/seg_001/thumb_00.jpg"},
+                                {"time": 18, "path": "thumbnails/seg_001/thumb_01.jpg"},
+                            ],
+                            "vision": {
+                                "summary": {
+                                    "description": "A seal swims close to the aquarium glass.",
+                                    "stable_subjects": ["marine_mammal"],
+                                }
+                            },
+                            "focus": {"score": 7, "matched_terms": [{"display": "海洋動物"}]},
+                        },
+                    },
+                    {
+                        "id": "seg_002",
+                        "start": 40,
+                        "end": 62,
+                        "duration_sec": 22,
+                        "title": "另一段互動",
+                        "summary": "分數較低所以沒有入選",
+                        "transcript": "你好 你好",
+                        "tags": ["對話"],
+                        "scores": {"hook": 5},
+                        "final_score": 5.0,
+                        "avoid_reason": "none",
+                        "scoring_source": "heuristic",
+                        "signals": {"focus": {"score": 2}},
+                    }
+                ],
+            )
+            ah.write_json(tmp_path / "project_focus.json", {"summary": "海洋動物"})
+
+            report = ah.write_review_report(tmp_path)
+            markdown = (tmp_path / "review_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(report["version"], "review_report_v1")
+        self.assertEqual(report["selected_segments"][0]["segment_id"], "seg_001")
+        self.assertEqual(report["selected_segments"][0]["visual_subjects"], ["marine_mammal"])
+        self.assertEqual(report["selected_segments"][0]["thumbnails"][0]["path"], "thumbnails/seg_001/thumb_00.jpg")
+        self.assertEqual(report["contact_sheet"], "review_contact_sheet.jpg")
+        self.assertEqual(report["near_miss_segments"][0]["segment_id"], "seg_002")
+        self.assertIn("skip_reason", report["near_miss_segments"][0])
+        self.assertIn("海豹靠近", markdown)
+        self.assertIn("海洋動物", markdown)
+        self.assertIn("thumbnails/seg_001/thumb_00.jpg", markdown)
+        self.assertIn("Near Misses", markdown)
+
+    def test_contact_sheet_inputs_uses_middle_thumbnail_when_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            thumb_dir = tmp_path / "thumbnails" / "seg_001"
+            thumb_dir.mkdir(parents=True)
+            first = thumb_dir / "thumb_00.jpg"
+            middle = thumb_dir / "thumb_01.jpg"
+            first.write_bytes(b"fake")
+            middle.write_bytes(b"fake")
+            report = {
+                "selected_segments": [
+                    {
+                        "thumbnails": [
+                            {"path": "thumbnails/seg_001/thumb_00.jpg"},
+                            {"path": "thumbnails/seg_001/thumb_01.jpg"},
+                        ]
+                    }
+                ]
+            }
+
+            paths = ah.contact_sheet_inputs(report, tmp_path)
+
+        self.assertEqual(paths, [middle])
+
     def test_padding_clamps_and_avoids_neighbor_overlap(self):
         selected = [
             {"start": 0, "end": 24, "duration_sec": 24},
@@ -453,6 +572,14 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIsNone(args.target_duration)
         self.assertEqual(args.retention_ratio, 0.3)
 
+    def test_report_parser_accepts_work_dir(self):
+        parser = ah.build_parser()
+
+        args = parser.parse_args(["report", "work/sample_video"])
+
+        self.assertEqual(args.work_dir, "work/sample_video")
+        self.assertEqual(args.func, ah.command_report)
+
     def test_render_defaults_compress_to_phone_resolution(self):
         parser = ah.build_parser()
 
@@ -462,6 +589,7 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(args.crf, 28)
         self.assertEqual(args.preset, "medium")
         self.assertEqual(args.audio_bitrate, "128k")
+        self.assertEqual(args.fade_duration, 0.25)
 
     def test_render_encoding_args_include_scale_and_crf(self):
         settings = ah.RenderSettings(output_size="720x1280", crf=30, preset="slow", audio_bitrate="96k")
@@ -473,6 +601,15 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("30", args)
         self.assertIn("slow", args)
         self.assertIn("96k", args)
+
+    def test_render_encoding_args_include_fade_when_enabled(self):
+        settings = ah.RenderSettings(output_size="720x1280", crf=30, preset="slow", audio_bitrate="96k", fade_duration=0.25)
+
+        args = ah.render_encoding_args(settings, clip_duration=10)
+
+        self.assertIn("fade=t=in:st=0:d=0.25", args[1])
+        self.assertIn("fade=t=out:st=9.75:d=0.25", args[1])
+        self.assertIn("afade=t=in:st=0:d=0.25,afade=t=out:st=9.75:d=0.25", args)
 
     def test_video_bitrate_overrides_crf_for_render_encoding(self):
         settings = ah.RenderSettings(output_size="1080x1920", crf=28, preset="medium", audio_bitrate="128k", video_bitrate="3500k")

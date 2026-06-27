@@ -110,6 +110,7 @@ DEFAULT_OUTPUT_SIZE = "1080x1920"
 DEFAULT_RENDER_CRF = 28
 DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
+DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
 DEFAULT_TARGET_RETENTION_RATIO = 0.30
 MAX_SELECTED_SEGMENTS = 10
@@ -140,6 +141,7 @@ class RenderSettings:
     preset: str
     audio_bitrate: str
     video_bitrate: str = ""
+    fade_duration: float = DEFAULT_FADE_DURATION
 
 
 def log(message: str) -> None:
@@ -243,15 +245,52 @@ def crf_arg(value: str) -> int:
     return crf
 
 
+def non_negative_float_arg(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be a non-negative number") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative number")
+    return number
+
+
 def render_scale_filter(output_size: str) -> str:
     width, height = parse_output_size(output_size)
     return f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
 
 
-def render_encoding_args(settings: RenderSettings) -> list[str]:
+def effective_fade_duration(settings: RenderSettings, clip_duration: float) -> float:
+    return round(max(0.0, min(settings.fade_duration, clip_duration / 2)), 3)
+
+
+def render_video_filter(settings: RenderSettings, clip_duration: float = 0.0) -> str:
+    filters = [render_scale_filter(settings.output_size)]
+    fade_duration = effective_fade_duration(settings, clip_duration)
+    if fade_duration > 0:
+        fade_out_start = round(max(0.0, clip_duration - fade_duration), 3)
+        filters.extend(
+            [
+                f"fade=t=in:st=0:d={fade_duration}",
+                f"fade=t=out:st={fade_out_start}:d={fade_duration}",
+            ]
+        )
+    return ",".join(filters)
+
+
+def render_audio_filter(settings: RenderSettings, clip_duration: float) -> list[str]:
+    fade_duration = effective_fade_duration(settings, clip_duration)
+    if fade_duration <= 0:
+        return []
+    fade_out_start = round(max(0.0, clip_duration - fade_duration), 3)
+    return ["-af", f"afade=t=in:st=0:d={fade_duration},afade=t=out:st={fade_out_start}:d={fade_duration}"]
+
+
+def render_encoding_args(settings: RenderSettings, clip_duration: float = 0.0) -> list[str]:
     args = [
         "-vf",
-        render_scale_filter(settings.output_size),
+        render_video_filter(settings, clip_duration),
+        *render_audio_filter(settings, clip_duration),
         "-c:v",
         "libx264",
         "-preset",
@@ -1426,6 +1465,83 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
     return sorted(selected, key=lambda item: item["start"])
 
 
+def selection_parameters(scored: list[dict[str, Any]], target_duration: float) -> dict[str, Any]:
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    max_selected = max_segments_for_target(target_duration)
+    subclip_duration = sum(item["duration_sec"] for item in scored if item.get("signals", {}).get("candidate_type") == "subclip")
+    prefer_subclips = subclip_duration >= target_duration * 0.8
+    pool = [
+        item
+        for item in scored
+        if not prefer_subclips or item.get("signals", {}).get("candidate_type") == "subclip" or item["duration_sec"] <= 32
+    ]
+    ranked_pool = sorted(pool, key=lambda item: item["final_score"], reverse=True)
+    top_score = float(ranked_pool[0]["final_score"]) if ranked_pool else 0.0
+    return {
+        "hard_budget": hard_budget,
+        "max_selected": max_selected,
+        "prefer_subclips": prefer_subclips,
+        "highlight_floor": max(MIN_HIGHLIGHT_SCORE, top_score * HIGHLIGHT_SCORE_RATIO),
+    }
+
+
+def skipped_reason(candidate: dict[str, Any], selected: list[dict[str, Any]], target_duration: float, params: dict[str, Any]) -> str:
+    selected_duration = sum(float(item.get("duration_sec", 0.0)) for item in selected)
+    if params.get("prefer_subclips") and candidate.get("signals", {}).get("candidate_type") != "subclip" and candidate["duration_sec"] > 32:
+        return "filtered_by_subclip_preference"
+    if selected and selected_duration >= target_duration and float(candidate["final_score"]) < float(params["highlight_floor"]):
+        return "below_highlight_floor"
+    if not candidate.get("is_standalone", True):
+        return "not_standalone"
+    if candidate.get("avoid_reason") not in (None, "", "none"):
+        return f"avoid_reason:{candidate.get('avoid_reason')}"
+    overlapping = next((item for item in selected if overlap_ratio(candidate, item) > 0.2), None)
+    if overlapping:
+        return f"overlaps_selected:{overlapping.get('id', '')}"
+    nearby = next((item for item in selected if abs(candidate["start"] - item["start"]) < 4), None)
+    if nearby:
+        return f"near_selected_start:{nearby.get('id', '')}"
+    similar = next((item for item in selected if too_visually_similar(candidate, item)), None)
+    if similar:
+        return f"visually_similar:{similar.get('id', '')}"
+    if selected and selected_duration + candidate["duration_sec"] > float(params["hard_budget"]):
+        return "hard_duration_cap"
+    if len(selected) >= int(params["max_selected"]):
+        return "segment_cap"
+    return "lower_rank"
+
+
+def near_miss_segments(plan: dict[str, Any], scored: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    selected_ids = {segment.get("segment_id") for segment in plan.get("selected_segments", [])}
+    scored_by_id = {item["id"]: item for item in scored}
+    selected = [scored_by_id[segment_id] for segment_id in selected_ids if segment_id in scored_by_id]
+    params = selection_parameters(scored, float(plan.get("target_duration_sec", 0.0) or 0.0))
+    near_misses = []
+    for candidate in sorted(scored, key=lambda item: item.get("final_score", 0), reverse=True):
+        if candidate.get("id") in selected_ids:
+            continue
+        signals = candidate.get("signals", {})
+        vision_summary = signals.get("vision", {}).get("summary", {})
+        near_misses.append(
+            {
+                "segment_id": candidate.get("id", ""),
+                "time": f"{format_time(float(candidate.get('start', 0.0)))}-{format_time(float(candidate.get('end', 0.0)))}",
+                "duration_sec": candidate.get("duration_sec"),
+                "title": candidate.get("title", candidate.get("id", "")),
+                "summary": candidate.get("summary", ""),
+                "final_score": candidate.get("final_score"),
+                "skip_reason": skipped_reason(candidate, selected, float(plan.get("target_duration_sec", 0.0) or 0.0), params),
+                "tags": candidate.get("tags", []),
+                "transcript_excerpt": summarize_transcript(candidate.get("transcript", ""), max_chars=100),
+                "visual_description": summarize_transcript(vision_summary.get("description", ""), max_chars=120),
+                "focus_score": signals.get("focus", {}).get("score", 0.0),
+            }
+        )
+        if len(near_misses) >= limit:
+            break
+    return near_misses
+
+
 def padded_segment_bounds(selected: list[dict[str, Any]], source_duration: float, padding: float) -> list[tuple[float, float]]:
     bounds = [
         (
@@ -1534,6 +1650,208 @@ def write_project_summary(out_dir: Path, target_duration: float) -> None:
     (out_dir / "codex_task.md").write_text(task, encoding="utf-8")
 
 
+def selected_segment_details(plan: dict[str, Any], scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_by_id = {item["id"]: item for item in scored}
+    details = []
+    for index, planned in enumerate(plan.get("selected_segments", []), start=1):
+        scored_item = scored_by_id.get(planned.get("segment_id"), {})
+        signals = scored_item.get("signals", {})
+        vision_summary = signals.get("vision", {}).get("summary", {})
+        focus = signals.get("focus", {})
+        details.append(
+            {
+                "sequence": index,
+                "segment_id": planned.get("segment_id", ""),
+                "role": planned.get("role", ""),
+                "time": f"{format_time(float(planned.get('source_start', 0.0)))}-{format_time(float(planned.get('source_end', 0.0)))}",
+                "source_start": planned.get("source_start"),
+                "source_end": planned.get("source_end"),
+                "duration_sec": planned.get("duration_sec"),
+                "original_source_start": planned.get("original_source_start"),
+                "original_source_end": planned.get("original_source_end"),
+                "title": planned.get("title") or scored_item.get("title") or planned.get("segment_id", ""),
+                "summary": scored_item.get("summary") or planned.get("reason", ""),
+                "reason": planned.get("reason", ""),
+                "final_score": planned.get("final_score", scored_item.get("final_score")),
+                "tags": scored_item.get("tags", []),
+                "scores": scored_item.get("scores", {}),
+                "heuristic_scores": scored_item.get("heuristic_scores", {}),
+                "transcript_excerpt": summarize_transcript(scored_item.get("transcript", ""), max_chars=120),
+                "keywords": signals.get("keywords", []),
+                "emotion_words": signals.get("emotion_words", []),
+                "place_words": signals.get("place_words", []),
+                "ocr_excerpt": summarize_transcript(signals.get("ocr", {}).get("text", ""), max_chars=100),
+                "visual_description": summarize_transcript(vision_summary.get("description", ""), max_chars=140),
+                "visual_subjects": vision_summary.get("stable_subjects") or vision_summary.get("normalized_subjects") or vision_summary.get("subjects", []),
+                "thumbnails": signals.get("thumbnails", []),
+                "focus_matches": focus.get("matched_terms", []),
+                "focus_score": focus.get("score", 0.0),
+                "visual_quality": signals.get("visual_quality", {}),
+                "avoid_reason": scored_item.get("avoid_reason", "none"),
+                "scoring_source": scored_item.get("scoring_source", ""),
+            }
+        )
+    return details
+
+
+def compact_list(values: Any) -> str:
+    items = listify(values)
+    return ", ".join(items) if items else "-"
+
+
+def thumbnail_paths(segment: dict[str, Any]) -> list[str]:
+    paths = []
+    for item in segment.get("thumbnails", []):
+        if isinstance(item, dict) and item.get("path"):
+            paths.append(str(item["path"]))
+    return paths
+
+
+def markdown_thumbnail_links(segment: dict[str, Any]) -> str:
+    paths = thumbnail_paths(segment)
+    if not paths:
+        return "-"
+    return ", ".join(f"`{path}`" for path in paths)
+
+
+def format_score_map(scores: dict[str, Any], keys: list[str]) -> str:
+    parts = []
+    for key in keys:
+        if key in scores:
+            parts.append(f"{key}={scores[key]}")
+    return ", ".join(parts) if parts else "-"
+
+
+def build_review_report(out_dir: Path) -> dict[str, Any]:
+    plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    focus_path = out_dir / "project_focus.json"
+    project_focus = read_json(focus_path) if focus_path.exists() else {}
+    details = selected_segment_details(plan, scored)
+    return {
+        "version": "review_report_v1",
+        "source_video": plan.get("source_video", ""),
+        "output_video": plan.get("output_video", ""),
+        "contact_sheet": "review_contact_sheet.jpg",
+        "target_duration_sec": plan.get("target_duration_sec"),
+        "selected_duration_sec": plan.get("selected_duration_sec"),
+        "selected_count": len(details),
+        "project_focus": project_focus,
+        "selected_segments": details,
+        "near_miss_segments": near_miss_segments(plan, scored),
+    }
+
+
+def render_review_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Highlight Review Report",
+        "",
+        f"- Source: `{report.get('source_video', '')}`",
+        f"- Output: `{report.get('output_video', '')}`",
+        f"- Contact sheet: `{report.get('contact_sheet', '')}`",
+        f"- Target duration: {report.get('target_duration_sec', 0)}s",
+        f"- Selected duration: {report.get('selected_duration_sec', 0)}s",
+        f"- Selected clips: {report.get('selected_count', 0)}",
+    ]
+    focus_summary = report.get("project_focus", {}).get("summary", "")
+    if focus_summary:
+        lines.append(f"- Project focus: {focus_summary}")
+    lines.append("")
+    lines.append("## Selected Segments")
+    for segment in report.get("selected_segments", []):
+        lines.extend(
+            [
+                "",
+                f"### {segment['sequence']}. {segment['title']} ({segment['segment_id']})",
+                "",
+                f"- Role/time: {segment['role']} at {segment['time']} ({segment['duration_sec']}s)",
+                f"- Score/source: {segment.get('final_score', '-')} from {segment.get('scoring_source') or 'unknown'}",
+                f"- Tags: {compact_list(segment.get('tags'))}",
+                f"- Reason: {segment.get('reason') or segment.get('summary') or '-'}",
+                f"- Transcript: {segment.get('transcript_excerpt') or '-'}",
+                f"- Visual: {segment.get('visual_description') or '-'}",
+                f"- Thumbnails: {markdown_thumbnail_links(segment)}",
+                f"- Visual subjects: {compact_list(segment.get('visual_subjects'))}",
+                f"- Focus: {compact_list([item.get('display', '') for item in segment.get('focus_matches', [])])} (score={segment.get('focus_score', 0)})",
+                f"- Signals: keywords={compact_list(segment.get('keywords'))}; emotion={compact_list(segment.get('emotion_words'))}; place={compact_list(segment.get('place_words'))}",
+                f"- Scores: {format_score_map(segment.get('scores', {}), ['hook', 'fun', 'interaction', 'place', 'emotion', 'clarity', 'focus'])}",
+            ]
+        )
+        if segment.get("ocr_excerpt"):
+            lines.append(f"- OCR: {segment['ocr_excerpt']}")
+    near_misses = report.get("near_miss_segments", [])
+    if near_misses:
+        lines.extend(["", "## Near Misses"])
+        for segment in near_misses:
+            lines.extend(
+                [
+                    "",
+                    f"### {segment['segment_id']}: {segment['title']}",
+                    "",
+                    f"- Time: {segment['time']} ({segment['duration_sec']}s)",
+                    f"- Score: {segment.get('final_score', '-')}",
+                    f"- Skip reason: {segment.get('skip_reason', '-')}",
+                    f"- Tags: {compact_list(segment.get('tags'))}",
+                    f"- Transcript: {segment.get('transcript_excerpt') or '-'}",
+                    f"- Visual: {segment.get('visual_description') or '-'}",
+                    f"- Focus score: {segment.get('focus_score', 0)}",
+                ]
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def contact_sheet_inputs(report: dict[str, Any], out_dir: Path) -> list[Path]:
+    paths = []
+    for segment in report.get("selected_segments", []):
+        segment_paths = thumbnail_paths(segment)
+        if segment_paths:
+            path = out_dir / segment_paths[min(1, len(segment_paths) - 1)]
+            if path.exists():
+                paths.append(path)
+    return paths
+
+
+def write_contact_sheet(out_dir: Path, report: dict[str, Any]) -> Optional[Path]:
+    image_paths = contact_sheet_inputs(report, out_dir)
+    if not image_paths or shutil.which("ffmpeg") is None:
+        return None
+    list_path = out_dir / "review_contact_sheet_inputs.txt"
+    output_path = out_dir / str(report.get("contact_sheet") or "review_contact_sheet.jpg")
+    list_lines = [f"file '{path.resolve().as_posix()}'" for path in image_paths]
+    list_path.write_text("\n".join(list_lines) + "\n", encoding="utf-8")
+    columns = min(4, len(image_paths))
+    rows = (len(image_paths) + columns - 1) // columns
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-vf",
+            f"scale=360:-1,tile={columns}x{rows}:padding=12:margin=12",
+            "-frames:v",
+            "1",
+            str(output_path),
+        ]
+    )
+    return output_path
+
+
+def write_review_report(out_dir: Path) -> dict[str, Any]:
+    report = build_review_report(out_dir)
+    write_contact_sheet(out_dir, report)
+    write_json(out_dir / "review_report.json", report)
+    (out_dir / "review_report.md").write_text(render_review_markdown(report), encoding="utf-8")
+    return report
+
+
 def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
     require_tool("ffmpeg")
     plan = read_json(out_dir / "edit_plan.json")
@@ -1545,6 +1863,7 @@ def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
     for index, segment in enumerate(plan.get("selected_segments", [])):
         clip_path = clips_dir / f"clip_{index:03d}.mp4"
         clip_paths.append(clip_path)
+        clip_duration = max(0.0, float(segment["source_end"]) - float(segment["source_start"]))
         run_command(
             [
                 "ffmpeg",
@@ -1555,7 +1874,7 @@ def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
                 str(segment["source_end"]),
                 "-i",
                 str(source_video),
-                *render_encoding_args(settings),
+                *render_encoding_args(settings, clip_duration),
                 str(clip_path),
             ]
         )
@@ -1614,7 +1933,14 @@ def command_plan(args: argparse.Namespace) -> None:
     plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio)
     write_json(out_dir / "edit_plan.json", plan)
     write_project_summary(out_dir, plan["target_duration_sec"])
+    write_review_report(out_dir)
     log(f"Wrote edit plan with {len(plan['selected_segments'])} segments to {out_dir / 'edit_plan.json'}")
+
+
+def command_report(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    report = write_review_report(out_dir)
+    log(f"Wrote review report for {report['selected_count']} segments to {out_dir / 'review_report.md'}")
 
 
 def command_render(args: argparse.Namespace) -> None:
@@ -1624,6 +1950,7 @@ def command_render(args: argparse.Namespace) -> None:
         preset=args.preset,
         audio_bitrate=args.audio_bitrate,
         video_bitrate=args.video_bitrate,
+        fade_duration=args.fade_duration,
     )
     render_edit_plan(Path(args.work_dir), settings)
 
@@ -1664,6 +1991,7 @@ def command_run(args: argparse.Namespace) -> None:
             preset=args.preset,
             audio_bitrate=args.audio_bitrate,
             video_bitrate=args.video_bitrate,
+            fade_duration=args.fade_duration,
         )
     )
 
@@ -1701,6 +2029,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     plan.set_defaults(func=command_plan)
 
+    report = subparsers.add_parser("report", help="Create review_report.md and review_report.json from the edit plan")
+    report.add_argument("work_dir", help="Work directory")
+    report.set_defaults(func=command_report)
+
     render = subparsers.add_parser("render", help="Render highlight.mp4 from edit_plan.json")
     render.add_argument("work_dir", help="Work directory")
     render.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
@@ -1708,6 +2040,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
     render.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     render.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
+    render.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
     render.set_defaults(func=command_render)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
@@ -1728,6 +2061,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
     run.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
+    run.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     run.set_defaults(func=command_run)
 
