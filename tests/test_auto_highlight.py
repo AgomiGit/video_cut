@@ -466,6 +466,38 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(subclips[0]["signals"]["thumbnails"][0]["path"], "thumbnails/seg_000/thumb_01.jpg")
         self.assertIn("marine_mammal", subclips[0]["signals"]["vision"]["summary"]["normalized_subjects"])
 
+    def test_visual_subclip_windows_ignore_quality_only_peaks(self):
+        candidate = {
+            "id": "seg_000",
+            "start": 0,
+            "end": 80,
+            "duration_sec": 80,
+        }
+        visual = {
+            "thumbnails": [
+                {"time": 12, "path": "thumbnails/seg_000/thumb_00.jpg"},
+                {"time": 38, "path": "thumbnails/seg_000/thumb_01.jpg"},
+                {"time": 64, "path": "thumbnails/seg_000/thumb_02.jpg"},
+            ],
+            "visual_quality_samples": [
+                {"brightness": 0.52, "contrast": 0.3, "sharpness": 0.2},
+                {"brightness": 0.52, "contrast": 0.35, "sharpness": 0.2},
+                {"brightness": 0.52, "contrast": 0.3, "sharpness": 0.2},
+            ],
+            "vision": {
+                "captions": [
+                    {"time": 12, "description": "Clear blue water and rocks.", "subjects": ["water"], "setting": "aquarium"},
+                    {"time": 38, "description": "A clear empty tank.", "subjects": ["water"], "setting": "aquarium"},
+                    {"time": 64, "description": "Bright water with glass reflections.", "subjects": ["water"], "setting": "aquarium"},
+                ],
+                "summary": {"description": "Water and rocks.", "normalized_subjects": [], "stable_subjects": []},
+            },
+        }
+
+        windows = ah.visual_subclip_windows(candidate, visual)
+
+        self.assertEqual(windows, [])
+
     def test_build_edit_plan_uses_scored_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
@@ -570,7 +602,11 @@ class AutoHighlightTests(unittest.TestCase):
                         "final_score": 5.0,
                         "avoid_reason": "none",
                         "scoring_source": "heuristic",
-                        "signals": {"focus": {"score": 2}},
+                        "signals": {
+                            "focus": {"score": 2},
+                            "thumbnails": [{"time": 51, "path": "thumbnails/seg_002/thumb_00.jpg"}],
+                            "vision": {"summary": {"description": "A decent but lower ranked aquarium moment.", "stable_subjects": ["aquarium"]}},
+                        },
                     }
                 ],
             )
@@ -586,20 +622,26 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(report["contact_sheet"], "review_contact_sheet.jpg")
         self.assertEqual(report["near_miss_segments"][0]["segment_id"], "seg_002")
         self.assertIn("skip_reason", report["near_miss_segments"][0])
+        self.assertEqual(report["near_miss_segments"][0]["thumbnails"][0]["path"], "thumbnails/seg_002/thumb_00.jpg")
         self.assertIn("海豹靠近", markdown)
         self.assertIn("海洋動物", markdown)
         self.assertIn("thumbnails/seg_001/thumb_00.jpg", markdown)
+        self.assertIn("thumbnails/seg_002/thumb_00.jpg", markdown)
         self.assertIn("Near Misses", markdown)
 
-    def test_contact_sheet_inputs_uses_middle_thumbnail_when_available(self):
+    def test_contact_sheet_inputs_uses_middle_thumbnail_for_selected_and_near_miss(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
-            thumb_dir = tmp_path / "thumbnails" / "seg_001"
-            thumb_dir.mkdir(parents=True)
-            first = thumb_dir / "thumb_00.jpg"
-            middle = thumb_dir / "thumb_01.jpg"
+            selected_dir = tmp_path / "thumbnails" / "seg_001"
+            near_miss_dir = tmp_path / "thumbnails" / "seg_002"
+            selected_dir.mkdir(parents=True)
+            near_miss_dir.mkdir(parents=True)
+            first = selected_dir / "thumb_00.jpg"
+            middle = selected_dir / "thumb_01.jpg"
+            near_miss = near_miss_dir / "thumb_00.jpg"
             first.write_bytes(b"fake")
             middle.write_bytes(b"fake")
+            near_miss.write_bytes(b"fake")
             report = {
                 "selected_segments": [
                     {
@@ -608,12 +650,13 @@ class AutoHighlightTests(unittest.TestCase):
                             {"path": "thumbnails/seg_001/thumb_01.jpg"},
                         ]
                     }
-                ]
+                ],
+                "near_miss_segments": [{"thumbnails": [{"path": "thumbnails/seg_002/thumb_00.jpg"}]}],
             }
 
             paths = ah.contact_sheet_inputs(report, tmp_path)
 
-        self.assertEqual(paths, [middle])
+        self.assertEqual(paths, [middle, near_miss])
 
     def test_padding_clamps_and_avoids_neighbor_overlap(self):
         selected = [

@@ -1000,6 +1000,21 @@ def visual_caption_score(caption: dict[str, Any], aggregate_summary: dict[str, A
     return round(visual_event_score_from_summary(summary) + stable_subject_score + interest_score + place_score, 3)
 
 
+def visual_caption_event_score(caption: dict[str, Any]) -> float:
+    summary = summarize_vision_captions([caption]) if caption else {}
+    caption_text = vision_summary_text(summary)
+    subject_terms = listify(caption.get("subjects"))
+    concrete_subjects = set()
+    for term in subject_terms:
+        normalized = normalize_focus_subject(term) or term.lower().strip()
+        if normalized and normalized not in FOCUS_GENERIC_TERMS:
+            concrete_subjects.add(normalized)
+    action_count = len(listify(summary.get("actions")))
+    hook_count = len(listify(summary.get("visual_hooks")))
+    interest_count = len(text_hits(caption_text, VISION_INTEREST_WORDS))
+    return round(min(10.0, len(concrete_subjects) * 2.0 + min(2, action_count) * 1.0 + min(2, hook_count) * 1.0 + interest_count * 0.8), 3)
+
+
 def visual_sample_points(visual: dict[str, Any]) -> list[dict[str, Any]]:
     thumbnails = visual.get("thumbnails", [])
     quality_samples = visual.get("visual_quality_samples", [])
@@ -1011,12 +1026,17 @@ def visual_sample_points(visual: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         caption = captions[index] if index < len(captions) and isinstance(captions[index], dict) else {}
         quality = quality_samples[index] if index < len(quality_samples) and isinstance(quality_samples[index], dict) else {}
-        score = visual_caption_score(caption, aggregate_summary) + visual_quality_score(quality)
+        caption_score = visual_caption_score(caption, aggregate_summary)
+        event_score = visual_caption_event_score(caption)
+        quality_score = visual_quality_score(quality)
         points.append(
             {
                 "time": float(thumbnail["time"]),
                 "path": thumbnail.get("path", ""),
-                "score": round(score, 3),
+                "score": round(caption_score + quality_score, 3),
+                "caption_score": caption_score,
+                "event_score": event_score,
+                "quality_score": quality_score,
                 "caption": caption,
                 "quality": quality,
             }
@@ -1068,9 +1088,10 @@ def visual_subclip_windows(candidate: dict[str, Any], visual: dict[str, Any], ta
     if float(candidate.get("duration_sec", 0.0)) < 32:
         return []
     points = sorted(visual_sample_points(visual), key=lambda item: item["score"], reverse=True)
-    minimum_score = max(2.5, float(points[0]["score"]) * 0.55) if points else 0.0
+    event_points = [point for point in points if float(point.get("event_score", 0.0)) >= 1.5]
+    minimum_score = max(2.5, float(event_points[0]["score"]) * 0.55) if event_points else 0.0
     windows = []
-    for point in points:
+    for point in event_points:
         if point["score"] < minimum_score:
             continue
         anchor = point["time"]
@@ -1673,6 +1694,8 @@ def near_miss_segments(plan: dict[str, Any], scored: list[dict[str, Any]], limit
                 "tags": candidate.get("tags", []),
                 "transcript_excerpt": summarize_transcript(candidate.get("transcript", ""), max_chars=100),
                 "visual_description": summarize_transcript(vision_summary.get("description", ""), max_chars=120),
+                "visual_subjects": vision_summary.get("stable_subjects") or vision_summary.get("normalized_subjects") or vision_summary.get("subjects", []),
+                "thumbnails": signals.get("thumbnails", []),
                 "focus_score": signals.get("focus", {}).get("score", 0.0),
             }
         )
@@ -1933,6 +1956,8 @@ def render_review_markdown(report: dict[str, Any]) -> str:
                     f"- Tags: {compact_list(segment.get('tags'))}",
                     f"- Transcript: {segment.get('transcript_excerpt') or '-'}",
                     f"- Visual: {segment.get('visual_description') or '-'}",
+                    f"- Thumbnails: {markdown_thumbnail_links(segment)}",
+                    f"- Visual subjects: {compact_list(segment.get('visual_subjects'))}",
                     f"- Focus score: {segment.get('focus_score', 0)}",
                 ]
             )
@@ -1942,12 +1967,13 @@ def render_review_markdown(report: dict[str, Any]) -> str:
 
 def contact_sheet_inputs(report: dict[str, Any], out_dir: Path) -> list[Path]:
     paths = []
-    for segment in report.get("selected_segments", []):
-        segment_paths = thumbnail_paths(segment)
-        if segment_paths:
-            path = out_dir / segment_paths[min(1, len(segment_paths) - 1)]
-            if path.exists():
-                paths.append(path)
+    for section in ("selected_segments", "near_miss_segments"):
+        for segment in report.get(section, []):
+            segment_paths = thumbnail_paths(segment)
+            if segment_paths:
+                path = out_dir / segment_paths[min(1, len(segment_paths) - 1)]
+                if path.exists():
+                    paths.append(path)
     return paths
 
 
