@@ -403,6 +403,69 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertTrue(any(item.signals.get("split_reason") == "transcript_event" for item in splits))
         self.assertTrue(any(item.start <= 30 <= item.end for item in splits))
 
+    def test_expand_with_visual_subclips_anchors_on_visual_peak(self):
+        candidates = [
+            {
+                "id": "seg_000",
+                "start": 0,
+                "end": 70,
+                "duration_sec": 70,
+                "transcript": "普通對話 哇 牠游過來了 普通對話",
+                "signals": {},
+            }
+        ]
+        segments = [
+            {"start": 2, "end": 5, "text": "普通對話"},
+            {"start": 31, "end": 34, "text": "哇 牠游過來了"},
+            {"start": 56, "end": 58, "text": "普通對話"},
+        ]
+        visuals = {
+            "seg_000": {
+                "thumbnails": [
+                    {"time": 8, "path": "thumbnails/seg_000/thumb_00.jpg"},
+                    {"time": 32, "path": "thumbnails/seg_000/thumb_01.jpg"},
+                    {"time": 60, "path": "thumbnails/seg_000/thumb_02.jpg"},
+                ],
+                "visual_quality": {"brightness": 0.5, "contrast": 0.2, "sharpness": 0.1},
+                "visual_quality_samples": [
+                    {"brightness": 0.5, "contrast": 0.1, "sharpness": 0.04},
+                    {"brightness": 0.52, "contrast": 0.25, "sharpness": 0.14},
+                    {"brightness": 0.5, "contrast": 0.1, "sharpness": 0.04},
+                ],
+                "ocr": {"text": "", "place_hits": []},
+                "vision": {
+                    "captions": [
+                        {"time": 8, "path": "thumbnails/seg_000/thumb_00.jpg", "description": "Water and rocks.", "subjects": ["water"], "setting": "aquarium"},
+                        {
+                            "time": 32,
+                            "path": "thumbnails/seg_000/thumb_01.jpg",
+                            "description": "A seal swims close to aquarium glass.",
+                            "subjects": ["seal"],
+                            "setting": "aquarium",
+                            "visual_hook": "close-up",
+                            "actions": ["swimming"],
+                        },
+                        {"time": 60, "path": "thumbnails/seg_000/thumb_02.jpg", "description": "Empty water.", "subjects": ["water"], "setting": "aquarium"},
+                    ],
+                    "summary": {
+                        "description": "A seal swims close to aquarium glass.",
+                        "stable_subjects": ["marine_mammal"],
+                        "normalized_subjects": ["marine_mammal"],
+                        "subject_counts": {"marine_mammal": 2},
+                    },
+                },
+            }
+        }
+
+        expanded = ah.expand_with_visual_subclips(candidates, visuals, segments, duration=70)
+        subclips = [item for item in expanded if item["signals"].get("split_reason") == "visual_event"]
+
+        self.assertTrue(subclips)
+        self.assertTrue(any(item["start"] <= 32 <= item["end"] for item in subclips))
+        self.assertEqual(subclips[0]["signals"]["candidate_type"], "subclip")
+        self.assertEqual(subclips[0]["signals"]["thumbnails"][0]["path"], "thumbnails/seg_000/thumb_01.jpg")
+        self.assertIn("marine_mammal", subclips[0]["signals"]["vision"]["summary"]["normalized_subjects"])
+
     def test_build_edit_plan_uses_scored_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)

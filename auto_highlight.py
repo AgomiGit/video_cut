@@ -981,6 +981,145 @@ def attach_visual_signals(candidates: list[dict[str, Any]], visuals_by_id: dict[
     return enriched
 
 
+def visual_quality_score(quality: dict[str, Any]) -> float:
+    brightness = float(quality.get("brightness", 0.0) or 0.0)
+    contrast = float(quality.get("contrast", 0.0) or 0.0)
+    sharpness = float(quality.get("sharpness", 0.0) or 0.0)
+    brightness_score = max(0.0, 1.0 - abs(brightness - 0.52) / 0.52)
+    return round(brightness_score * 1.2 + min(1.0, contrast * 5.0) * 1.0 + min(1.0, sharpness * 12.0) * 1.0, 3)
+
+
+def visual_caption_score(caption: dict[str, Any], aggregate_summary: dict[str, Any]) -> float:
+    summary = summarize_vision_captions([caption]) if caption else {}
+    caption_text = vision_summary_text(summary)
+    aggregate_subjects = set(listify(aggregate_summary.get("stable_subjects")) or listify(aggregate_summary.get("normalized_subjects")))
+    caption_subjects = set(listify(summary.get("normalized_subjects")) + listify(summary.get("stable_subjects")))
+    stable_subject_score = 2.0 if aggregate_subjects and aggregate_subjects & caption_subjects else 0.0
+    interest_score = len(text_hits(caption_text, VISION_INTEREST_WORDS)) * 0.8
+    place_score = len(text_hits(caption_text, VISION_PLACE_WORDS)) * 0.5
+    return round(visual_event_score_from_summary(summary) + stable_subject_score + interest_score + place_score, 3)
+
+
+def visual_sample_points(visual: dict[str, Any]) -> list[dict[str, Any]]:
+    thumbnails = visual.get("thumbnails", [])
+    quality_samples = visual.get("visual_quality_samples", [])
+    captions = visual.get("vision", {}).get("captions", [])
+    aggregate_summary = visual.get("vision", {}).get("summary", {})
+    points = []
+    for index, thumbnail in enumerate(thumbnails):
+        if not isinstance(thumbnail, dict) or "time" not in thumbnail:
+            continue
+        caption = captions[index] if index < len(captions) and isinstance(captions[index], dict) else {}
+        quality = quality_samples[index] if index < len(quality_samples) and isinstance(quality_samples[index], dict) else {}
+        score = visual_caption_score(caption, aggregate_summary) + visual_quality_score(quality)
+        points.append(
+            {
+                "time": float(thumbnail["time"]),
+                "path": thumbnail.get("path", ""),
+                "score": round(score, 3),
+                "caption": caption,
+                "quality": quality,
+            }
+        )
+    return points
+
+
+def visual_signal_subset(visual: dict[str, Any], start: float, end: float, anchor_time: float) -> dict[str, Any]:
+    thumbnails = [
+        item
+        for item in visual.get("thumbnails", [])
+        if isinstance(item, dict) and start <= float(item.get("time", -1.0)) <= end
+    ]
+    captions = [
+        item
+        for item in visual.get("vision", {}).get("captions", [])
+        if isinstance(item, dict) and start <= float(item.get("time", -1.0)) <= end
+    ]
+    if not thumbnails:
+        thumbnails = sorted(
+            [item for item in visual.get("thumbnails", []) if isinstance(item, dict) and "time" in item],
+            key=lambda item: abs(float(item.get("time", 0.0)) - anchor_time),
+        )[:1]
+    if not captions:
+        captions = sorted(
+            [item for item in visual.get("vision", {}).get("captions", []) if isinstance(item, dict) and "time" in item],
+            key=lambda item: abs(float(item.get("time", 0.0)) - anchor_time),
+        )[:1]
+    quality_samples = [
+        point["quality"]
+        for point in visual_sample_points(visual)
+        if start <= float(point["time"]) <= end and point.get("quality")
+    ]
+    quality = average_quality(quality_samples) if quality_samples else visual.get("visual_quality", {})
+    return {
+        "visual_quality": quality,
+        "visual_quality_penalty": quality_penalty_from_visuals(quality),
+        "ocr": visual.get("ocr", {}),
+        "vision": {
+            **visual.get("vision", {}),
+            "captions": captions,
+            "summary": summarize_vision_captions(captions),
+        },
+        "thumbnails": thumbnails,
+    }
+
+
+def visual_subclip_windows(candidate: dict[str, Any], visual: dict[str, Any], target_duration: float = TARGET_SEGMENT_SECONDS) -> list[tuple[float, float, float]]:
+    if float(candidate.get("duration_sec", 0.0)) < 32:
+        return []
+    points = sorted(visual_sample_points(visual), key=lambda item: item["score"], reverse=True)
+    minimum_score = max(2.5, float(points[0]["score"]) * 0.55) if points else 0.0
+    windows = []
+    for point in points:
+        if point["score"] < minimum_score:
+            continue
+        anchor = point["time"]
+        start = max(float(candidate["start"]), anchor - target_duration / 2)
+        end = min(float(candidate["end"]), start + target_duration)
+        start = max(float(candidate["start"]), end - target_duration)
+        if end - start >= 12:
+            windows.append((point["score"], start, end))
+    accepted: list[tuple[float, float, float]] = []
+    for score, start, end in windows:
+        if any(max(0.0, min(end, used_end) - max(start, used_start)) / max(1.0, min(end - start, used_end - used_start)) > 0.55 for _, used_start, used_end in accepted):
+            continue
+        accepted.append((score, start, end))
+    return sorted(accepted, key=lambda item: item[1])
+
+
+def expand_with_visual_subclips(
+    candidates: list[dict[str, Any]],
+    visuals_by_id: dict[str, dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+) -> list[dict[str, Any]]:
+    expanded = list(candidates)
+    existing_ids = {candidate["id"] for candidate in expanded}
+    for candidate in candidates:
+        visual = visuals_by_id.get(candidate["id"])
+        if not visual:
+            continue
+        for index, (score, start, end) in enumerate(visual_subclip_windows(candidate, visual)):
+            candidate_id = f"{candidate['id']}_visual_{index:02d}"
+            if candidate_id in existing_ids:
+                continue
+            split = candidate_from_window(candidate_id, start, end, segments, duration)
+            if not split:
+                continue
+            visual_signals = visual_signal_subset(visual, split.start, split.end, (start + end) / 2)
+            signals = {
+                **split.signals,
+                **visual_signals,
+                "candidate_type": "subclip",
+                "parent_candidate_id": candidate["id"],
+                "split_reason": "visual_event",
+                "split_event_score": round(score, 3),
+            }
+            expanded.append(candidate_to_dict(Candidate(split.id, split.start, split.end, split.transcript, signals)))
+            existing_ids.add(candidate_id)
+    return expanded
+
+
 def listify(value: Any) -> list[str]:
     if value is None:
         return []
@@ -1907,7 +2046,12 @@ def command_score(args: argparse.Namespace) -> None:
     source = read_json(out_dir / "source.json")
     target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), args.target_duration, args.retention_ratio)
     candidates = read_json(out_dir / "candidates.json")
-    candidates = attach_visual_signals(candidates, load_visual_signals(out_dir))
+    visuals_by_id = load_visual_signals(out_dir)
+    if visuals_by_id:
+        transcript_path = out_dir / "transcript.json"
+        segments = transcript_segments(read_json(transcript_path)) if transcript_path.exists() else []
+        candidates = expand_with_visual_subclips(candidates, visuals_by_id, segments, float(source.get("duration_sec", 0.0)))
+    candidates = attach_visual_signals(candidates, visuals_by_id)
     project_focus = infer_project_focus(candidates)
     write_json(out_dir / "project_focus.json", project_focus)
     candidates = attach_focus_signals(candidates, project_focus)
