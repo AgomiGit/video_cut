@@ -288,6 +288,28 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in selected], ["a", "b", "c"])
 
+    def test_select_segments_keeps_highlights_after_soft_target(self):
+        scored = [
+            {"id": "a", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "b", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8.4, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "c", "start": 60, "end": 80, "duration_sec": 20, "final_score": 7.8, "is_standalone": True, "avoid_reason": "none"},
+        ]
+
+        selected = ah.select_segments(scored, target_duration=40)
+
+        self.assertEqual([item["id"] for item in selected], ["a", "b", "c"])
+
+    def test_select_segments_stops_low_quality_after_soft_target(self):
+        scored = [
+            {"id": "a", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "b", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8.4, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "c", "start": 60, "end": 80, "duration_sec": 20, "final_score": 4.0, "is_standalone": True, "avoid_reason": "none"},
+        ]
+
+        selected = ah.select_segments(scored, target_duration=40)
+
+        self.assertEqual([item["id"] for item in selected], ["a", "b"])
+
     def test_select_segments_prefers_subclips_when_available(self):
         scored = [
             {"id": "long", "start": 0, "end": 60, "duration_sec": 60, "final_score": 10, "is_standalone": True, "avoid_reason": "none", "signals": {}},

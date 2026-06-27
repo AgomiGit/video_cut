@@ -111,6 +111,11 @@ DEFAULT_RENDER_CRF = 28
 DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_CLIP_PADDING = 2.5
+MAX_SELECTED_SEGMENTS = 6
+HIGHLIGHT_SCORE_RATIO = 0.72
+MIN_HIGHLIGHT_SCORE = 4.5
+HARD_DURATION_EXTRA_SEC = 30.0
+HARD_DURATION_MULTIPLIER = 1.5
 
 
 @dataclass(frozen=True)
@@ -1372,7 +1377,7 @@ def too_visually_similar(candidate: dict[str, Any], existing: dict[str, Any]) ->
 def select_segments(scored: list[dict[str, Any]], target_duration: float) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     total = 0.0
-    budget = target_duration * 1.1
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
     subclip_duration = sum(item["duration_sec"] for item in scored if item.get("signals", {}).get("candidate_type") == "subclip")
     prefer_subclips = subclip_duration >= target_duration * 0.8
     pool = [
@@ -1380,7 +1385,13 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
         for item in scored
         if not prefer_subclips or item.get("signals", {}).get("candidate_type") == "subclip" or item["duration_sec"] <= 32
     ]
-    for candidate in sorted(pool, key=lambda item: item["final_score"], reverse=True):
+    ranked_pool = sorted(pool, key=lambda item: item["final_score"], reverse=True)
+    top_score = float(ranked_pool[0]["final_score"]) if ranked_pool else 0.0
+    highlight_floor = max(MIN_HIGHLIGHT_SCORE, top_score * HIGHLIGHT_SCORE_RATIO)
+    for candidate in ranked_pool:
+        candidate_score = float(candidate["final_score"])
+        if selected and total >= target_duration and candidate_score < highlight_floor:
+            break
         if not candidate.get("is_standalone", True):
             continue
         if candidate.get("avoid_reason") not in (None, "", "none"):
@@ -1391,11 +1402,11 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
             continue
         if any(too_visually_similar(candidate, existing) for existing in selected):
             continue
-        if selected and total + candidate["duration_sec"] > budget:
+        if selected and total + candidate["duration_sec"] > hard_budget:
             continue
         selected.append(candidate)
         total += candidate["duration_sec"]
-        if total >= target_duration:
+        if len(selected) >= MAX_SELECTED_SEGMENTS:
             break
     return sorted(selected, key=lambda item: item["start"])
 
