@@ -398,6 +398,27 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(plan["version"], "edit_plan_v1")
         self.assertEqual(plan["selected_segments"][0]["segment_id"], "seg_001")
         self.assertEqual(plan["selected_segments"][0]["role"], "hook")
+        self.assertEqual(plan["selected_segments"][0]["source_start"], 2.5)
+        self.assertEqual(plan["selected_segments"][0]["source_end"], 32.5)
+        self.assertEqual(plan["selected_segments"][0]["original_source_start"], 5)
+
+    def test_padding_clamps_and_avoids_neighbor_overlap(self):
+        selected = [
+            {"start": 0, "end": 24, "duration_sec": 24},
+            {"start": 26, "end": 50, "duration_sec": 24},
+        ]
+
+        bounds = ah.padded_segment_bounds(selected, source_duration=60, padding=3)
+
+        self.assertEqual(bounds[0], (0.0, 25.0))
+        self.assertEqual(bounds[1], (25.0, 53.0))
+
+    def test_plan_parser_defaults_to_clip_padding(self):
+        parser = ah.build_parser()
+
+        args = parser.parse_args(["plan", "work/sample_video"])
+
+        self.assertEqual(args.clip_padding, 2.5)
 
     def test_render_defaults_compress_to_phone_resolution(self):
         parser = ah.build_parser()

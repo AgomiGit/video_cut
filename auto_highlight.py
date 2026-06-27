@@ -110,6 +110,7 @@ DEFAULT_OUTPUT_SIZE = "1080x1920"
 DEFAULT_RENDER_CRF = 28
 DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
+DEFAULT_CLIP_PADDING = 2.5
 
 
 @dataclass(frozen=True)
@@ -1399,20 +1400,45 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
     return sorted(selected, key=lambda item: item["start"])
 
 
-def build_edit_plan(out_dir: Path, target_duration: float) -> dict[str, Any]:
+def padded_segment_bounds(selected: list[dict[str, Any]], source_duration: float, padding: float) -> list[tuple[float, float]]:
+    bounds = [
+        (
+            max(0.0, float(item["start"]) - padding),
+            min(source_duration, float(item["end"]) + padding),
+        )
+        for item in selected
+    ]
+    for index in range(len(bounds) - 1):
+        left_start, left_end = bounds[index]
+        right_start, right_end = bounds[index + 1]
+        if left_end <= right_start:
+            continue
+        original_gap_midpoint = (float(selected[index]["end"]) + float(selected[index + 1]["start"])) / 2
+        boundary = max(left_start, min(right_end, original_gap_midpoint))
+        bounds[index] = (left_start, min(left_end, boundary))
+        bounds[index + 1] = (max(right_start, boundary), right_end)
+    return [(round(start, 3), round(end, 3)) for start, end in bounds]
+
+
+def build_edit_plan(out_dir: Path, target_duration: float, clip_padding: float = DEFAULT_CLIP_PADDING) -> dict[str, Any]:
     source = read_json(out_dir / "source.json")
     scored = read_json(out_dir / "scored_segments.json")
     selected = select_segments(scored, target_duration)
+    padded_bounds = padded_segment_bounds(selected, float(source.get("duration_sec", 0.0)), max(0.0, clip_padding))
     segments = []
     for index, item in enumerate(selected):
         role = "hook" if index == 0 else ("ending" if index == len(selected) - 1 else "highlight")
+        source_start, source_end = padded_bounds[index]
         segments.append(
             {
                 "segment_id": item["id"],
                 "role": role,
-                "source_start": item["start"],
-                "source_end": item["end"],
-                "duration_sec": item["duration_sec"],
+                "source_start": source_start,
+                "source_end": source_end,
+                "duration_sec": round(source_end - source_start, 3),
+                "original_source_start": item["start"],
+                "original_source_end": item["end"],
+                "clip_padding_sec": clip_padding,
                 "title": item.get("title", item["id"]),
                 "reason": item.get("summary", ""),
                 "final_score": item.get("final_score"),
@@ -1549,7 +1575,7 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
 
 def command_plan(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
-    plan = build_edit_plan(out_dir, args.target_duration)
+    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding)
     write_json(out_dir / "edit_plan.json", plan)
     write_project_summary(out_dir, args.target_duration)
     log(f"Wrote edit plan with {len(plan['selected_segments'])} segments to {out_dir / 'edit_plan.json'}")
@@ -1581,7 +1607,7 @@ def command_run(args: argparse.Namespace) -> None:
         )
     score_args = argparse.Namespace(work_dir=args.out, planner=args.planner, model=args.model, target_duration=args.target_duration)
     command_score(score_args)
-    plan_args = argparse.Namespace(work_dir=args.out, target_duration=args.target_duration)
+    plan_args = argparse.Namespace(work_dir=args.out, target_duration=args.target_duration, clip_padding=args.clip_padding)
     command_plan(plan_args)
     command_render(
         argparse.Namespace(
@@ -1623,6 +1649,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="Create edit_plan.json from scored segments")
     plan.add_argument("work_dir", help="Work directory")
     plan.add_argument("--target-duration", type=float, default=180)
+    plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     plan.set_defaults(func=command_plan)
 
     render = subparsers.add_parser("render", help="Render highlight.mp4 from edit_plan.json")
@@ -1651,6 +1678,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
     run.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
+    run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     run.set_defaults(func=command_run)
 
     return parser
