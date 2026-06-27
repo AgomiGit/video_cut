@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import auto_highlight as ah
@@ -657,6 +658,55 @@ class AutoHighlightTests(unittest.TestCase):
             paths = ah.contact_sheet_inputs(report, tmp_path)
 
         self.assertEqual(paths, [middle, near_miss])
+
+    def test_contact_sheet_sections_keep_selected_and_near_miss_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            selected_dir = tmp_path / "thumbnails" / "seg_001"
+            near_miss_dir = tmp_path / "thumbnails" / "seg_002"
+            selected_dir.mkdir(parents=True)
+            near_miss_dir.mkdir(parents=True)
+            selected = selected_dir / "thumb_00.jpg"
+            near_miss = near_miss_dir / "thumb_00.jpg"
+            selected.write_bytes(b"fake")
+            near_miss.write_bytes(b"fake")
+            report = {
+                "selected_segments": [{"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}],
+                "near_miss_segments": [{"thumbnails": [{"path": "thumbnails/seg_002/thumb_00.jpg"}]}],
+            }
+
+            sections = ah.contact_sheet_sections(report, tmp_path)
+
+        self.assertEqual(sections, [("selected", [selected]), ("near_miss", [near_miss])])
+
+    def test_write_contact_sheet_renders_section_tiles_before_stacking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            for segment_id in ("seg_001", "seg_002", "seg_003"):
+                thumb_dir = tmp_path / "thumbnails" / segment_id
+                thumb_dir.mkdir(parents=True)
+                (thumb_dir / "thumb_00.jpg").write_bytes(b"fake")
+            report = {
+                "contact_sheet": "review_contact_sheet.jpg",
+                "selected_segments": [{"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}],
+                "near_miss_segments": [
+                    {"thumbnails": [{"path": "thumbnails/seg_002/thumb_00.jpg"}]},
+                    {"thumbnails": [{"path": "thumbnails/seg_003/thumb_00.jpg"}]},
+                ],
+            }
+
+            with (
+                mock.patch.object(ah.shutil, "which", return_value="/usr/bin/ffmpeg"),
+                mock.patch.object(ah, "write_contact_sheet_tile") as write_tile,
+                mock.patch.object(ah, "stack_contact_sheet_tiles") as stack_tiles,
+            ):
+                output = ah.write_contact_sheet(tmp_path, report)
+
+        self.assertEqual(output, tmp_path / "review_contact_sheet.jpg")
+        self.assertEqual(write_tile.call_count, 2)
+        self.assertEqual(write_tile.call_args_list[0].args[2], 2)
+        self.assertEqual(write_tile.call_args_list[1].args[2], 2)
+        self.assertEqual(stack_tiles.call_count, 1)
 
     def test_padding_clamps_and_avoids_neighbor_overlap(self):
         selected = [

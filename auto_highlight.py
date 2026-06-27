@@ -1966,26 +1966,32 @@ def render_review_markdown(report: dict[str, Any]) -> str:
 
 
 def contact_sheet_inputs(report: dict[str, Any], out_dir: Path) -> list[Path]:
-    paths = []
-    for section in ("selected_segments", "near_miss_segments"):
+    return [path for _, paths in contact_sheet_sections(report, out_dir) for path in paths]
+
+
+def contact_sheet_sections(report: dict[str, Any], out_dir: Path) -> list[tuple[str, list[Path]]]:
+    section_names = {
+        "selected_segments": "selected",
+        "near_miss_segments": "near_miss",
+    }
+    sections = []
+    for section, section_name in section_names.items():
+        paths = []
         for segment in report.get(section, []):
             segment_paths = thumbnail_paths(segment)
             if segment_paths:
                 path = out_dir / segment_paths[min(1, len(segment_paths) - 1)]
                 if path.exists():
                     paths.append(path)
-    return paths
+        if paths:
+            sections.append((section_name, paths))
+    return sections
 
 
-def write_contact_sheet(out_dir: Path, report: dict[str, Any]) -> Optional[Path]:
-    image_paths = contact_sheet_inputs(report, out_dir)
-    if not image_paths or shutil.which("ffmpeg") is None:
-        return None
-    list_path = out_dir / "review_contact_sheet_inputs.txt"
-    output_path = out_dir / str(report.get("contact_sheet") or "review_contact_sheet.jpg")
+def write_contact_sheet_tile(image_paths: list[Path], output_path: Path, columns: int) -> None:
+    list_path = output_path.with_suffix(".txt")
     list_lines = [f"file '{path.resolve().as_posix()}'" for path in image_paths]
     list_path.write_text("\n".join(list_lines) + "\n", encoding="utf-8")
-    columns = min(4, len(image_paths))
     rows = (len(image_paths) + columns - 1) // columns
     run_command(
         [
@@ -2006,6 +2012,31 @@ def write_contact_sheet(out_dir: Path, report: dict[str, Any]) -> Optional[Path]
             str(output_path),
         ]
     )
+
+
+def stack_contact_sheet_tiles(tile_paths: list[Path], output_path: Path) -> None:
+    if len(tile_paths) == 1:
+        shutil.copyfile(tile_paths[0], output_path)
+        return
+    args = ["ffmpeg", "-y", "-v", "error"]
+    for tile_path in tile_paths:
+        args.extend(["-i", str(tile_path)])
+    args.extend(["-filter_complex", f"vstack=inputs={len(tile_paths)}", "-frames:v", "1", str(output_path)])
+    run_command(args)
+
+
+def write_contact_sheet(out_dir: Path, report: dict[str, Any]) -> Optional[Path]:
+    sections = contact_sheet_sections(report, out_dir)
+    if not sections or shutil.which("ffmpeg") is None:
+        return None
+    output_path = out_dir / str(report.get("contact_sheet") or "review_contact_sheet.jpg")
+    columns = min(4, max(len(paths) for _, paths in sections))
+    tile_paths = []
+    for section_name, image_paths in sections:
+        tile_path = out_dir / f"review_contact_sheet_{section_name}.jpg"
+        write_contact_sheet_tile(image_paths, tile_path, columns)
+        tile_paths.append(tile_path)
+    stack_contact_sheet_tiles(tile_paths, output_path)
     return output_path
 
 
