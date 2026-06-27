@@ -99,6 +99,10 @@ FOCUS_GENERIC_TERMS = {
 }
 THUMB_WIDTH = 768
 QUALITY_FRAME_SIZE = 64
+DEFAULT_OUTPUT_SIZE = "1080x1920"
+DEFAULT_RENDER_CRF = 28
+DEFAULT_RENDER_PRESET = "medium"
+DEFAULT_AUDIO_BITRATE = "128k"
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,15 @@ class Candidate:
     @property
     def duration(self) -> float:
         return max(0.0, self.end - self.start)
+
+
+@dataclass(frozen=True)
+class RenderSettings:
+    output_size: str
+    crf: int
+    preset: str
+    audio_bitrate: str
+    video_bitrate: str = ""
 
 
 def log(message: str) -> None:
@@ -187,6 +200,54 @@ def video_duration(video_path: Path) -> float:
         return float(output.strip())
     except ValueError as exc:
         raise SystemExit(f"Could not read video duration from ffprobe output: {output!r}") from exc
+
+
+def parse_output_size(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)x(\d+)", value.strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError("output size must use WIDTHxHEIGHT, for example 1080x1920")
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width < 2 or height < 2:
+        raise argparse.ArgumentTypeError("output size must be at least 2x2")
+    return width, height
+
+
+def output_size_arg(value: str) -> str:
+    width, height = parse_output_size(value)
+    return f"{width}x{height}"
+
+
+def crf_arg(value: str) -> int:
+    try:
+        crf = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("CRF must be an integer from 0 to 51") from exc
+    if not 0 <= crf <= 51:
+        raise argparse.ArgumentTypeError("CRF must be an integer from 0 to 51")
+    return crf
+
+
+def render_scale_filter(output_size: str) -> str:
+    width, height = parse_output_size(output_size)
+    return f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
+
+
+def render_encoding_args(settings: RenderSettings) -> list[str]:
+    args = [
+        "-vf",
+        render_scale_filter(settings.output_size),
+        "-c:v",
+        "libx264",
+        "-preset",
+        settings.preset,
+    ]
+    if settings.video_bitrate:
+        args.extend(["-b:v", settings.video_bitrate])
+    else:
+        args.extend(["-crf", str(settings.crf)])
+    args.extend(["-c:a", "aac", "-b:a", settings.audio_bitrate, "-movflags", "+faststart"])
+    return args
 
 
 def init_work_dir(out_dir: Path, source_video: Path) -> None:
@@ -1219,7 +1280,7 @@ def write_project_summary(out_dir: Path, target_duration: float) -> None:
     (out_dir / "codex_task.md").write_text(task, encoding="utf-8")
 
 
-def render_edit_plan(out_dir: Path) -> None:
+def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
     require_tool("ffmpeg")
     plan = read_json(out_dir / "edit_plan.json")
     source_video = Path(plan["source_video"])
@@ -1240,12 +1301,7 @@ def render_edit_plan(out_dir: Path) -> None:
                 str(segment["source_end"]),
                 "-i",
                 str(source_video),
-                "-c:v",
-                "libx264",
-                "-c:a",
-                "aac",
-                "-movflags",
-                "+faststart",
+                *render_encoding_args(settings),
                 str(clip_path),
             ]
         )
@@ -1306,7 +1362,14 @@ def command_plan(args: argparse.Namespace) -> None:
 
 
 def command_render(args: argparse.Namespace) -> None:
-    render_edit_plan(Path(args.work_dir))
+    settings = RenderSettings(
+        output_size=args.output_size,
+        crf=args.crf,
+        preset=args.preset,
+        audio_bitrate=args.audio_bitrate,
+        video_bitrate=args.video_bitrate,
+    )
+    render_edit_plan(Path(args.work_dir), settings)
 
 
 def command_run(args: argparse.Namespace) -> None:
@@ -1326,7 +1389,16 @@ def command_run(args: argparse.Namespace) -> None:
     command_score(score_args)
     plan_args = argparse.Namespace(work_dir=args.out, target_duration=args.target_duration)
     command_plan(plan_args)
-    command_render(argparse.Namespace(work_dir=args.out))
+    command_render(
+        argparse.Namespace(
+            work_dir=args.out,
+            output_size=args.output_size,
+            crf=args.crf,
+            preset=args.preset,
+            audio_bitrate=args.audio_bitrate,
+            video_bitrate=args.video_bitrate,
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1361,6 +1433,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = subparsers.add_parser("render", help="Render highlight.mp4 from edit_plan.json")
     render.add_argument("work_dir", help="Work directory")
+    render.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
+    render.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
+    render.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
+    render.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
+    render.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     render.set_defaults(func=command_render)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
@@ -1375,6 +1452,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ocr-languages", default="chi_tra+eng")
     run.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
     run.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    run.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
+    run.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
+    run.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
+    run.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
+    run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     run.set_defaults(func=command_run)
 
     return parser

@@ -303,6 +303,40 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(plan["selected_segments"][0]["segment_id"], "seg_001")
         self.assertEqual(plan["selected_segments"][0]["role"], "hook")
 
+    def test_render_defaults_compress_to_phone_resolution(self):
+        parser = ah.build_parser()
+
+        args = parser.parse_args(["render", "work/sample_video"])
+
+        self.assertEqual(args.output_size, "1080x1920")
+        self.assertEqual(args.crf, 28)
+        self.assertEqual(args.preset, "medium")
+        self.assertEqual(args.audio_bitrate, "128k")
+
+    def test_render_encoding_args_include_scale_and_crf(self):
+        settings = ah.RenderSettings(output_size="720x1280", crf=30, preset="slow", audio_bitrate="96k")
+
+        args = ah.render_encoding_args(settings)
+
+        self.assertIn("scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1", args)
+        self.assertIn("-crf", args)
+        self.assertIn("30", args)
+        self.assertIn("slow", args)
+        self.assertIn("96k", args)
+
+    def test_video_bitrate_overrides_crf_for_render_encoding(self):
+        settings = ah.RenderSettings(output_size="1080x1920", crf=28, preset="medium", audio_bitrate="128k", video_bitrate="3500k")
+
+        args = ah.render_encoding_args(settings)
+
+        self.assertIn("-b:v", args)
+        self.assertIn("3500k", args)
+        self.assertNotIn("-crf", args)
+
+    def test_output_size_arg_rejects_invalid_size(self):
+        with self.assertRaises(Exception):
+            ah.output_size_arg("vertical")
+
 
 if __name__ == "__main__":
     unittest.main()
