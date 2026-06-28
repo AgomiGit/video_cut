@@ -311,6 +311,30 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in selected], ["a", "b"])
 
+    def test_select_segments_does_not_pad_target_with_weak_segments(self):
+        scored = [
+            {"id": "a", "start": 0, "end": 24, "duration_sec": 24, "final_score": 3.8, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "b", "start": 80, "end": 104, "duration_sec": 24, "final_score": 2.3, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "c", "start": 150, "end": 174, "duration_sec": 24, "final_score": 1.2, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "d", "start": 190, "end": 214, "duration_sec": 24, "final_score": 0.9, "is_standalone": True, "avoid_reason": "none"},
+        ]
+
+        selected = ah.select_segments(scored, target_duration=90)
+
+        self.assertEqual([item["id"] for item in selected], ["a", "b"])
+
+    def test_select_segments_allows_weak_continuation_near_strong_segment(self):
+        scored = [
+            {"id": "a", "start": 0, "end": 24, "duration_sec": 24, "final_score": 3.8, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "b", "start": 80, "end": 104, "duration_sec": 24, "final_score": 2.3, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "c", "start": 104, "end": 128, "duration_sec": 24, "final_score": 1.2, "is_standalone": True, "avoid_reason": "none"},
+            {"id": "d", "start": 190, "end": 214, "duration_sec": 24, "final_score": 0.9, "is_standalone": True, "avoid_reason": "none"},
+        ]
+
+        selected = ah.select_segments(scored, target_duration=90)
+
+        self.assertEqual([item["id"] for item in selected], ["a", "b", "c"])
+
     def test_resolve_target_duration_defaults_to_source_retention(self):
         self.assertEqual(ah.resolve_target_duration(180, None), 54)
         self.assertEqual(ah.resolve_target_duration(600, None), 180)
@@ -679,6 +703,17 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual(sections, [("selected", [selected]), ("near_miss", [near_miss])])
 
+    def test_write_contact_sheet_label_image_creates_visible_label_strip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            label_path = Path(directory) / "label.ppm"
+
+            ah.write_contact_sheet_label_image("Selected", label_path, width=200)
+
+            data = label_path.read_bytes()
+
+        self.assertTrue(data.startswith(b"P6\n200 48\n255\n"))
+        self.assertIn(b"\xf2\xf2\xf2", data)
+
     def test_write_contact_sheet_renders_section_tiles_before_stacking(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
@@ -706,7 +741,29 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(write_tile.call_count, 2)
         self.assertEqual(write_tile.call_args_list[0].args[2], 2)
         self.assertEqual(write_tile.call_args_list[1].args[2], 2)
+        self.assertEqual(write_tile.call_args_list[0].args[3], "Selected")
+        self.assertEqual(write_tile.call_args_list[1].args[3], "Near Misses")
         self.assertEqual(stack_tiles.call_count, 1)
+
+    def test_write_contact_sheet_tile_stacks_label_with_tile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            image_path = tmp_path / "thumb.jpg"
+            output_path = tmp_path / "section.jpg"
+            image_path.write_bytes(b"fake")
+
+            with (
+                mock.patch.object(ah, "run_command") as run_command,
+                mock.patch.object(ah, "stack_contact_sheet_tiles") as stack_tiles,
+            ):
+                ah.write_contact_sheet_tile([image_path], output_path, columns=1, label="Selected")
+
+        self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(run_command.call_args.args[0][-1], str(tmp_path / "section_tile.jpg"))
+        self.assertEqual(stack_tiles.call_count, 1)
+        self.assertEqual(stack_tiles.call_args.args[0][0], tmp_path / "section_label.ppm")
+        self.assertEqual(stack_tiles.call_args.args[0][1], tmp_path / "section_tile.jpg")
+        self.assertEqual(stack_tiles.call_args.args[1], output_path)
 
     def test_padding_clamps_and_avoids_neighbor_overlap(self):
         selected = [

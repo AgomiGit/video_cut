@@ -116,9 +116,27 @@ DEFAULT_TARGET_RETENTION_RATIO = 0.30
 MAX_SELECTED_SEGMENTS = 10
 TARGET_SEGMENT_SECONDS = 24.0
 HIGHLIGHT_SCORE_RATIO = 0.72
+MIN_PRE_TARGET_SCORE_RATIO = 0.5
 MIN_HIGHLIGHT_SCORE = 4.5
 HARD_DURATION_EXTRA_SEC = 30.0
 HARD_DURATION_MULTIPLIER = 1.5
+CONTACT_SHEET_LABELS = {
+    "selected": "Selected",
+    "near_miss": "Near Misses",
+}
+CONTACT_SHEET_FONT = {
+    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+    "C": ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+    "D": ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+    "E": ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+    "I": ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
+    "L": ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+    "M": ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+    "N": ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+    "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+    "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+    "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+}
 
 
 @dataclass(frozen=True)
@@ -1575,6 +1593,18 @@ def too_visually_similar(candidate: dict[str, Any], existing: dict[str, Any]) ->
     return center_gap < 90 or similarity >= 0.82
 
 
+def temporal_gap(left: dict[str, Any], right: dict[str, Any]) -> float:
+    if float(left["end"]) <= float(right["start"]):
+        return float(right["start"]) - float(left["end"])
+    if float(right["end"]) <= float(left["start"]):
+        return float(left["start"]) - float(right["end"])
+    return 0.0
+
+
+def continues_selected_moment(candidate: dict[str, Any], selected: list[dict[str, Any]], anchor_score_floor: float) -> bool:
+    return any(temporal_gap(candidate, existing) <= 8.0 and float(existing.get("final_score", 0.0)) >= anchor_score_floor for existing in selected)
+
+
 def resolve_target_duration(source_duration: float, requested_target: Optional[float], retention_ratio: float = DEFAULT_TARGET_RETENTION_RATIO) -> float:
     if requested_target is not None:
         return max(1.0, float(requested_target))
@@ -1602,8 +1632,12 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
     ranked_pool = sorted(pool, key=lambda item: item["final_score"], reverse=True)
     top_score = float(ranked_pool[0]["final_score"]) if ranked_pool else 0.0
     highlight_floor = max(MIN_HIGHLIGHT_SCORE, top_score * HIGHLIGHT_SCORE_RATIO)
+    pre_target_floor = top_score * MIN_PRE_TARGET_SCORE_RATIO
     for candidate in ranked_pool:
         candidate_score = float(candidate["final_score"])
+        is_continuation = continues_selected_moment(candidate, selected, pre_target_floor)
+        if selected and total < target_duration and candidate_score < pre_target_floor and not is_continuation:
+            continue
         if selected and total >= target_duration and candidate_score < highlight_floor:
             break
         if not candidate.get("is_standalone", True):
@@ -1614,7 +1648,7 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
             continue
         if any(abs(candidate["start"] - existing["start"]) < 4 for existing in selected):
             continue
-        if any(too_visually_similar(candidate, existing) for existing in selected):
+        if any(too_visually_similar(candidate, existing) and not is_continuation for existing in selected):
             continue
         if selected and total + candidate["duration_sec"] > hard_budget:
             continue
@@ -1641,6 +1675,7 @@ def selection_parameters(scored: list[dict[str, Any]], target_duration: float) -
         "hard_budget": hard_budget,
         "max_selected": max_selected,
         "prefer_subclips": prefer_subclips,
+        "pre_target_floor": top_score * MIN_PRE_TARGET_SCORE_RATIO,
         "highlight_floor": max(MIN_HIGHLIGHT_SCORE, top_score * HIGHLIGHT_SCORE_RATIO),
     }
 
@@ -1649,6 +1684,9 @@ def skipped_reason(candidate: dict[str, Any], selected: list[dict[str, Any]], ta
     selected_duration = sum(float(item.get("duration_sec", 0.0)) for item in selected)
     if params.get("prefer_subclips") and candidate.get("signals", {}).get("candidate_type") != "subclip" and candidate["duration_sec"] > 32:
         return "filtered_by_subclip_preference"
+    is_continuation = continues_selected_moment(candidate, selected, float(params["pre_target_floor"]))
+    if selected and selected_duration < target_duration and float(candidate["final_score"]) < float(params["pre_target_floor"]) and not is_continuation:
+        return "below_pre_target_floor"
     if selected and selected_duration >= target_duration and float(candidate["final_score"]) < float(params["highlight_floor"]):
         return "below_highlight_floor"
     if not candidate.get("is_standalone", True):
@@ -1661,7 +1699,7 @@ def skipped_reason(candidate: dict[str, Any], selected: list[dict[str, Any]], ta
     nearby = next((item for item in selected if abs(candidate["start"] - item["start"]) < 4), None)
     if nearby:
         return f"near_selected_start:{nearby.get('id', '')}"
-    similar = next((item for item in selected if too_visually_similar(candidate, item)), None)
+    similar = next((item for item in selected if too_visually_similar(candidate, item) and not is_continuation), None)
     if similar:
         return f"visually_similar:{similar.get('id', '')}"
     if selected and selected_duration + candidate["duration_sec"] > float(params["hard_budget"]):
@@ -1988,11 +2026,49 @@ def contact_sheet_sections(report: dict[str, Any], out_dir: Path) -> list[tuple[
     return sections
 
 
-def write_contact_sheet_tile(image_paths: list[Path], output_path: Path, columns: int) -> None:
+def contact_sheet_tile_width(columns: int) -> int:
+    return columns * 360 + max(0, columns - 1) * 12 + 24
+
+
+def write_contact_sheet_label_image(label: str, output_path: Path, width: int, height: int = 48) -> None:
+    pixels = bytearray([12, 12, 12] * width * height)
+    scale = 4
+    x = 14
+    y = 10
+    for char in label.upper():
+        if char == " ":
+            x += scale * 4
+            continue
+        glyph = CONTACT_SHEET_FONT.get(char)
+        if not glyph:
+            x += scale * 6
+            continue
+        for row_index, row in enumerate(glyph):
+            for col_index, bit in enumerate(row):
+                if bit != "1":
+                    continue
+                left = x + col_index * scale
+                top = y + row_index * scale
+                for dy in range(scale):
+                    py = top + dy
+                    if py >= height:
+                        continue
+                    for dx in range(scale):
+                        px = left + dx
+                        if px >= width:
+                            continue
+                        offset = (py * width + px) * 3
+                        pixels[offset : offset + 3] = b"\xf2\xf2\xf2"
+        x += scale * 6
+    output_path.write_bytes(f"P6\n{width} {height}\n255\n".encode("ascii") + pixels)
+
+
+def write_contact_sheet_tile(image_paths: list[Path], output_path: Path, columns: int, label: str = "") -> None:
     list_path = output_path.with_suffix(".txt")
     list_lines = [f"file '{path.resolve().as_posix()}'" for path in image_paths]
     list_path.write_text("\n".join(list_lines) + "\n", encoding="utf-8")
     rows = (len(image_paths) + columns - 1) // columns
+    tile_path = output_path.with_name(f"{output_path.stem}_tile{output_path.suffix}") if label else output_path
     run_command(
         [
             "ffmpeg",
@@ -2009,9 +2085,13 @@ def write_contact_sheet_tile(image_paths: list[Path], output_path: Path, columns
             f"scale=360:-1,tile={columns}x{rows}:padding=12:margin=12",
             "-frames:v",
             "1",
-            str(output_path),
+            str(tile_path),
         ]
     )
+    if label:
+        label_path = output_path.with_name(f"{output_path.stem}_label.ppm")
+        write_contact_sheet_label_image(label, label_path, contact_sheet_tile_width(columns))
+        stack_contact_sheet_tiles([label_path, tile_path], output_path)
 
 
 def stack_contact_sheet_tiles(tile_paths: list[Path], output_path: Path) -> None:
@@ -2034,7 +2114,7 @@ def write_contact_sheet(out_dir: Path, report: dict[str, Any]) -> Optional[Path]
     tile_paths = []
     for section_name, image_paths in sections:
         tile_path = out_dir / f"review_contact_sheet_{section_name}.jpg"
-        write_contact_sheet_tile(image_paths, tile_path, columns)
+        write_contact_sheet_tile(image_paths, tile_path, columns, CONTACT_SHEET_LABELS.get(section_name, section_name))
         tile_paths.append(tile_path)
     stack_contact_sheet_tiles(tile_paths, output_path)
     return output_path
