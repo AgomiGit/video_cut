@@ -56,7 +56,7 @@ work/video1/output/highlight.mp4
 可選，但很有用：
 
 - `ollama`：在你自己的電腦跑 AI 模型
-- `qwen3:6b`：用來看文字片段，幫片段打分
+- `qwen2.5:3b`：用來看文字片段，幫片段打分
 - `qwen2.5vl:7b`：用來看縮圖，描述畫面裡有什麼
 
 ## macOS 安裝方式
@@ -65,8 +65,8 @@ work/video1/output/highlight.mp4
 
 ```bash
 brew install ffmpeg uv ollama
-uv pip install faster-whisper
-ollama pull qwen3:6b
+uv sync --extra transcribe
+ollama pull qwen2.5:3b
 ollama pull qwen2.5vl:7b
 ```
 
@@ -78,9 +78,9 @@ ollama pull qwen2.5vl:7b
 sudo apt update
 sudo apt install ffmpeg python3 python3-pip
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv pip install faster-whisper
+uv sync --extra transcribe
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:6b
+ollama pull qwen2.5:3b
 ollama pull qwen2.5vl:7b
 ```
 
@@ -95,7 +95,8 @@ Windows 可以用這些方式：
 安裝模型：
 
 ```bash
-ollama pull qwen3:6b
+uv sync --extra transcribe
+ollama pull qwen2.5:3b
 ollama pull qwen2.5vl:7b
 ```
 
@@ -147,10 +148,10 @@ uv run python auto_highlight.py run input.mp4 \
   --out work/video1 \
   --target-duration 180 \
   --planner ollama \
-  --model qwen3:6b
+  --model qwen2.5:3b
 ```
 
-這裡的 `qwen3:6b` 是看文字用的模型。
+這裡的 `qwen2.5:3b` 是看文字用的模型。
 
 ## 分段執行
 

@@ -11,6 +11,70 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(ah.format_time(829.4), "00:13:49")
         self.assertEqual(ah.format_time(3661.2), "01:01:01")
 
+    def test_init_work_dir_rejects_different_source_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            first = tmp_path / "first.mp4"
+            second = tmp_path / "second.mp4"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            out_dir = tmp_path / "work"
+
+            with mock.patch.object(ah, "video_duration", return_value=10.0):
+                ah.init_work_dir(out_dir, first)
+                with self.assertRaises(SystemExit):
+                    ah.init_work_dir(out_dir, second)
+
+    def test_init_work_dir_allows_same_legacy_source_without_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            source = tmp_path / "source.mp4"
+            source.write_bytes(b"source")
+            out_dir = tmp_path / "work"
+            out_dir.mkdir()
+            ah.write_json(out_dir / "source.json", {"source_video": str(source.resolve()), "duration_sec": 10.0})
+
+            with mock.patch.object(ah, "video_duration", return_value=10.0):
+                ah.init_work_dir(out_dir, source)
+
+            updated = ah.read_json(out_dir / "source.json")
+            self.assertEqual(updated["fingerprint"]["size_bytes"], len(b"source"))
+
+    def test_extract_audio_force_regenerates_existing_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            source = tmp_path / "source.mp4"
+            source.write_bytes(b"source")
+            out_dir = tmp_path / "work"
+            out_dir.mkdir()
+            audio = out_dir / "audio.wav"
+            audio.write_bytes(b"old")
+
+            with mock.patch.object(ah, "require_tool"), mock.patch.object(ah, "run_command") as run_command:
+                result = ah.extract_audio(source, out_dir, force=True)
+
+            self.assertEqual(result, audio)
+            self.assertFalse(audio.exists())
+            self.assertEqual(run_command.call_count, 1)
+
+    def test_invalidate_generated_artifacts_keeps_source_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/source.mp4"})
+            for name in ("audio.wav", "transcript.json", "review_contact_sheet.jpg"):
+                (tmp_path / name).write_bytes(b"generated")
+            for name in ("clips", "thumbnails", "output"):
+                path = tmp_path / name
+                path.mkdir()
+                (path / "generated.txt").write_text("generated", encoding="utf-8")
+
+            ah.invalidate_generated_artifacts(tmp_path)
+
+            self.assertTrue((tmp_path / "source.json").exists())
+            self.assertFalse((tmp_path / "audio.wav").exists())
+            self.assertFalse((tmp_path / "review_contact_sheet.jpg").exists())
+            self.assertFalse((tmp_path / "clips").exists())
+
     def test_generate_candidates_merges_keyword_windows(self):
         transcript = {
             "duration_sec": 80,
@@ -110,6 +174,43 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(parsed["setting"], "aquarium")
         self.assertEqual(parsed["subjects"], ["animal"])
         self.assertEqual(fallback["description"], "A dark indoor aquarium scene.")
+
+    def test_bool_value_parses_string_false(self):
+        self.assertFalse(ah.bool_value("false"))
+        self.assertFalse(ah.bool_value("0"))
+        self.assertTrue(ah.bool_value("yes"))
+
+    def test_score_with_ollama_normalizes_model_output(self):
+        candidate = {
+            "id": "seg_001",
+            "start": 0,
+            "end": 20,
+            "duration_sec": 20,
+            "transcript": "哇 你看",
+            "signals": {
+                "keywords": ["哇", "你看"],
+                "emotion_words": ["哇"],
+                "place_words": [],
+                "speech_density": 0.5,
+                "utterance_count": 2,
+                "question_exclamation_count": 1,
+            },
+        }
+        response = (
+            "thinking...\n"
+            '{"summary":"usable summary","title":"title","tags":"hook, reaction",'
+            '"scores":{"hook":"9","fun":"bad","interaction":7,"place":0,"emotion":8,"clarity":6},'
+            '"is_standalone":"false","avoid_reason":"too confusing"}'
+        )
+
+        with mock.patch.object(ah, "run_capture", return_value=response):
+            scored = ah.score_with_ollama(candidate, "qwen2.5:3b")
+
+        self.assertFalse(scored["is_standalone"])
+        self.assertEqual(scored["scores"]["hook"], 9.0)
+        self.assertEqual(scored["scores"]["fun"], 0.0)
+        self.assertEqual(scored["tags"], ["hook", "reaction"])
+        self.assertEqual(scored["avoid_reason"], "too confusing")
 
     def test_vision_response_missing_image_detection(self):
         parsed = {"description": "No image was provided for analysis.", "setting": "", "visual_hook": "", "quality_note": ""}

@@ -127,7 +127,7 @@ be split into resumable steps:
 
 ```bash
 uv run python auto_highlight.py prepare input.mp4 --out work/video1
-uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:6b
+uv run python auto_highlight.py score work/video1 --planner ollama --model qwen2.5:3b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
 uv run python auto_highlight.py render work/video1
 ```
@@ -500,7 +500,7 @@ Desired command:
 uv run python auto_highlight.py run /path/to/input.mp4 \
   --out work/video1 \
   --target-duration 180 \
-  --model qwen3:6b \
+  --model qwen2.5:3b \
   --planner ollama
 ```
 
@@ -541,4 +541,3 @@ The first usable version is successful if it can:
 4. Score and select a reasonable subset.
 5. Render a playable highlight video.
 6. Save enough metadata for debugging and future Codex CLI handoff.
-

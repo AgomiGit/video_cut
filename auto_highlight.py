@@ -124,6 +124,20 @@ CONTACT_SHEET_LABELS = {
     "selected": "Selected",
     "near_miss": "Near Misses",
 }
+GENERATED_ARTIFACT_FILES = [
+    "audio.wav",
+    "transcript.json",
+    "candidates.json",
+    "visual_segments.json",
+    "scored_segments.json",
+    "project_focus.json",
+    "project.summary.json",
+    "edit_plan.json",
+    "review_report.json",
+    "review_report.md",
+    "ffmpeg_concat.txt",
+]
+GENERATED_ARTIFACT_DIRS = ["clips", "thumbnails", "output"]
 CONTACT_SHEET_FONT = {
     "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
     "C": ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
@@ -176,6 +190,47 @@ def write_json(path: Path, data: Any) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+
+def source_fingerprint(source_video: Path) -> dict[str, Any]:
+    stat = source_video.stat()
+    return {
+        "path": str(source_video.resolve()),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def source_matches(existing: dict[str, Any], current: dict[str, Any]) -> bool:
+    existing_path = existing.get("source_video") or existing.get("fingerprint", {}).get("path")
+    if existing_path and Path(str(existing_path)).expanduser().resolve() != Path(str(current["source_video"])).resolve():
+        return False
+    existing_fingerprint = existing.get("fingerprint")
+    if isinstance(existing_fingerprint, dict):
+        return (
+            existing_fingerprint.get("size_bytes") == current["fingerprint"]["size_bytes"]
+            and existing_fingerprint.get("mtime_ns") == current["fingerprint"]["mtime_ns"]
+        )
+    return True
+
+
+def ensure_work_subdirs(out_dir: Path) -> None:
+    for name in GENERATED_ARTIFACT_DIRS:
+        (out_dir / name).mkdir(parents=True, exist_ok=True)
+
+
+def invalidate_generated_artifacts(out_dir: Path) -> None:
+    for name in GENERATED_ARTIFACT_FILES:
+        path = out_dir / name
+        if path.exists():
+            path.unlink()
+    for path in out_dir.glob("review_contact_sheet*"):
+        if path.is_file():
+            path.unlink()
+    for name in GENERATED_ARTIFACT_DIRS:
+        path = out_dir / name
+        if path.exists():
+            shutil.rmtree(path)
 
 
 def require_tool(name: str) -> None:
@@ -322,26 +377,47 @@ def render_encoding_args(settings: RenderSettings, clip_duration: float = 0.0) -
     return args
 
 
-def init_work_dir(out_dir: Path, source_video: Path) -> None:
+def init_work_dir(out_dir: Path, source_video: Path, force: bool = False) -> None:
     if out_dir.exists() and any(out_dir.iterdir()):
         log(f"Using existing work directory: {out_dir}")
+        source_path = out_dir / "source.json"
+        source = {
+            "source_video": str(source_video.resolve()),
+            "duration_sec": video_duration(source_video),
+            "fingerprint": source_fingerprint(source_video),
+        }
+        if source_path.exists():
+            existing_source = read_json(source_path)
+            if not source_matches(existing_source, source) and not force:
+                raise SystemExit(
+                    f"Work directory {out_dir} was prepared for a different or changed source video. "
+                    "Use a new --out directory or rerun prepare/run with --force to regenerate source-dependent artifacts."
+                )
+        elif not force:
+            raise SystemExit(
+                f"Work directory {out_dir} is not empty and has no source.json. "
+                "Use a new --out directory or rerun with --force if you want to use it anyway."
+            )
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("clips", "thumbnails", "output"):
-        (out_dir / name).mkdir(parents=True, exist_ok=True)
-    source = {
-        "source_video": str(source_video.resolve()),
-        "duration_sec": video_duration(source_video),
-    }
+        source = {
+            "source_video": str(source_video.resolve()),
+            "duration_sec": video_duration(source_video),
+            "fingerprint": source_fingerprint(source_video),
+        }
+    ensure_work_subdirs(out_dir)
     write_json(out_dir / "source.json", source)
 
 
-def extract_audio(source_video: Path, out_dir: Path) -> Path:
+def extract_audio(source_video: Path, out_dir: Path, force: bool = False) -> Path:
     require_tool("ffmpeg")
     audio_path = out_dir / "audio.wav"
     if audio_path.exists():
-        log(f"Audio already exists: {audio_path}")
-        return audio_path
+        if force:
+            audio_path.unlink()
+        else:
+            log(f"Audio already exists: {audio_path}")
+            return audio_path
     run_command(
         [
             "ffmpeg",
@@ -359,11 +435,14 @@ def extract_audio(source_video: Path, out_dir: Path) -> Path:
     return audio_path
 
 
-def transcribe_audio(audio_path: Path, out_dir: Path, model: str) -> Path:
+def transcribe_audio(audio_path: Path, out_dir: Path, model: str, force: bool = False) -> Path:
     transcript_path = out_dir / "transcript.json"
     if transcript_path.exists():
-        log(f"Transcript already exists: {transcript_path}")
-        return transcript_path
+        if force:
+            transcript_path.unlink()
+        else:
+            log(f"Transcript already exists: {transcript_path}")
+            return transcript_path
 
     code = (
         "import json, sys\n"
@@ -1456,17 +1535,74 @@ def infer_tags(candidate: dict[str, Any]) -> list[str]:
     return tags
 
 
+def number_value(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def bool_value(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1", "standalone", "usable"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "not_standalone", "not standalone", "unusable"}:
+            return False
+    return default
+
+
+def string_value(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def string_list_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in re.split(r"[,，、|]", value) if item.strip()]
+    return []
+
+
+def normalize_llm_scores(scores: Any) -> dict[str, float]:
+    if not isinstance(scores, dict):
+        return {}
+    return {
+        key: max(0.0, min(10.0, number_value(scores.get(key), 0.0)))
+        for key in ("hook", "fun", "interaction", "place", "emotion", "clarity")
+    }
+
+
+def normalize_avoid_reason(value: Any) -> str:
+    reason = string_value(value, "none") or "none"
+    if reason.strip().lower() in {"none", "no", "n/a", "na", "usable", "ok", "okay"}:
+        return "none"
+    return reason
+
+
 def final_score_from_scores(heuristic: dict[str, float], llm_scores: Optional[dict[str, Any]]) -> float:
     if not llm_scores:
         return heuristic["total_heuristic_score"]
     quality_penalty = heuristic.get("quality_penalty", 0.0)
     return (
-        float(llm_scores.get("hook", 0)) * 0.25
-        + float(llm_scores.get("fun", 0)) * 0.15
-        + float(llm_scores.get("interaction", 0)) * 0.20
-        + float(llm_scores.get("place", 0)) * 0.15
-        + float(llm_scores.get("emotion", 0)) * 0.15
-        + float(llm_scores.get("clarity", 0)) * 0.10
+        number_value(llm_scores.get("hook"), 0.0) * 0.25
+        + number_value(llm_scores.get("fun"), 0.0) * 0.15
+        + number_value(llm_scores.get("interaction"), 0.0) * 0.20
+        + number_value(llm_scores.get("place"), 0.0) * 0.15
+        + number_value(llm_scores.get("emotion"), 0.0) * 0.15
+        + number_value(llm_scores.get("clarity"), 0.0) * 0.10
         - quality_penalty
     )
 
@@ -1483,15 +1619,17 @@ def score_with_ollama(candidate: dict[str, Any], model: str) -> dict[str, Any]:
     output = run_capture(["ollama", "run", model, json.dumps(prompt, ensure_ascii=False)])
     parsed = parse_first_json(output)
     heuristic = heuristic_scores(candidate)
-    llm_scores = parsed.get("scores", {}) if isinstance(parsed, dict) else {}
+    llm_scores = normalize_llm_scores(parsed.get("scores", {}))
+    tags = string_list_value(parsed.get("tags")) or infer_tags(candidate)
+    avoid_reason = normalize_avoid_reason(parsed.get("avoid_reason", "none"))
     return {
         **score_with_heuristic(candidate),
-        "summary": parsed.get("summary") or summarize_transcript(candidate["transcript"]),
-        "title": parsed.get("title") or summarize_transcript(candidate["transcript"], max_chars=18),
-        "tags": parsed.get("tags") or infer_tags(candidate),
+        "summary": string_value(parsed.get("summary")) or summarize_transcript(candidate["transcript"]),
+        "title": string_value(parsed.get("title")) or summarize_transcript(candidate["transcript"], max_chars=18),
+        "tags": tags,
         "scores": llm_scores,
-        "is_standalone": bool(parsed.get("is_standalone", True)),
-        "avoid_reason": parsed.get("avoid_reason", "none"),
+        "is_standalone": bool_value(parsed.get("is_standalone"), True),
+        "avoid_reason": avoid_reason,
         "scoring_source": "ollama",
         "final_score": round(final_score_from_scores(heuristic, llm_scores), 3),
     }
@@ -2168,9 +2306,12 @@ def command_prepare(args: argparse.Namespace) -> None:
     if not source_video.exists():
         raise SystemExit(f"Input video not found: {source_video}")
     out_dir = Path(args.out)
-    init_work_dir(out_dir, source_video)
-    audio_path = extract_audio(source_video, out_dir)
-    transcript_path = transcribe_audio(audio_path, out_dir, args.whisper_model)
+    init_work_dir(out_dir, source_video, args.force)
+    if args.force:
+        invalidate_generated_artifacts(out_dir)
+        ensure_work_subdirs(out_dir)
+    audio_path = extract_audio(source_video, out_dir, args.force)
+    transcript_path = transcribe_audio(audio_path, out_dir, args.whisper_model, args.force)
     transcript = read_json(transcript_path)
     source = read_json(out_dir / "source.json")
     candidates = generate_candidates_from_transcript(transcript, source["duration_sec"])
@@ -2237,7 +2378,7 @@ def command_render(args: argparse.Namespace) -> None:
 
 
 def command_run(args: argparse.Namespace) -> None:
-    prepare_args = argparse.Namespace(input=args.input, out=args.out, whisper_model=args.whisper_model)
+    prepare_args = argparse.Namespace(input=args.input, out=args.out, whisper_model=args.whisper_model, force=args.force)
     command_prepare(prepare_args)
     if args.visuals:
         command_analyze_visuals(
@@ -2285,12 +2426,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("input", help="Input video path")
     prepare.add_argument("--out", required=True, help="Work directory")
     prepare.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
+    prepare.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
     prepare.set_defaults(func=command_prepare)
 
     score = subparsers.add_parser("score", help="Score candidate segments")
     score.add_argument("work_dir", help="Work directory")
     score.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    score.add_argument("--model", default="qwen3:6b", help="Ollama model")
+    score.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
     score.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     score.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     score.set_defaults(func=command_score)
@@ -2330,8 +2472,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     run.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     run.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    run.add_argument("--model", default="qwen3:6b", help="Ollama model")
+    run.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
+    run.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
     run.add_argument("--visuals", action="store_true", help="Analyze thumbnails and optional OCR before scoring")
     run.add_argument("--thumbnail-count", type=int, default=3)
     run.add_argument("--ocr-languages", default="chi_tra+eng")
