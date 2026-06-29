@@ -138,6 +138,7 @@ GENERATED_ARTIFACT_FILES = [
     "plan_confidence.json",
     "gpt_review_packet.json",
     "codex_review_result.json",
+    "codex_review_apply_result.json",
     "edit_plan.before_codex_review.json",
     "edit_plan.gpt_reviewed.json",
     "review_report.json",
@@ -2250,9 +2251,8 @@ def all_selected_clarity_below(selected: list[dict[str, Any]], threshold: float)
     return all(score < threshold for score in clarity_scores)
 
 
-def validate_edit_plan(plan: dict[str, Any]) -> list[str]:
+def validate_edit_plan(plan: dict[str, Any], source_duration: Optional[float] = None) -> list[str]:
     errors = []
-    source_duration = None
     selected = plan.get("selected_segments", [])
     if not isinstance(selected, list):
         return ["selected_segments_not_list"]
@@ -2432,6 +2432,226 @@ def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] 
     }
     write_json(out_dir / "gpt_review_packet.json", packet)
     return packet
+
+
+def source_duration_for_plan(out_dir: Path, plan: dict[str, Any]) -> float:
+    source_path = out_dir / "source.json"
+    if source_path.exists():
+        source = read_json(source_path)
+        return float(source.get("duration_sec", 0.0) or 0.0)
+    ends = [float(segment.get("source_end", 0.0) or 0.0) for segment in plan.get("selected_segments", [])]
+    return max(ends) if ends else 0.0
+
+
+def review_packet_allowed_ids(packet: dict[str, Any]) -> set[str]:
+    allowed: set[str] = set()
+    for key in ("selected_segments", "near_miss_segments", "top_candidates"):
+        for item in packet.get(key, []):
+            segment_id = item.get("segment_id") or item.get("candidate", {}).get("segment_id")
+            if segment_id:
+                allowed.add(str(segment_id))
+    return allowed
+
+
+def normalize_review_decision(value: Any) -> str:
+    decision = string_value(value, "").lower().replace("-", "_")
+    if decision in {"approve", "approved"}:
+        return "approve"
+    if decision in {"revise", "review", "edit", "modify"}:
+        return "revise"
+    if decision in {"rerank", "rebuild", "rescue"}:
+        return "rerank"
+    raise ValueError(f"Unsupported review decision: {value}")
+
+
+def review_result_selected_ids(result: dict[str, Any], current_ids: list[str], allowed_ids: set[str]) -> list[str]:
+    decision = normalize_review_decision(result.get("decision"))
+    if decision == "approve":
+        return current_ids
+    explicit_ids = result.get("selected_segment_ids")
+    if explicit_ids is not None:
+        selected_ids = [str(item).strip() for item in listify(explicit_ids) if str(item).strip()]
+        validate_review_segment_ids(selected_ids, allowed_ids)
+        return selected_ids
+    selected_ids = list(current_ids)
+    operations = result.get("operations", [])
+    if not isinstance(operations, list):
+        raise ValueError("operations must be a list")
+    if decision == "rerank" and not operations:
+        raise ValueError("rerank requires selected_segment_ids or operations")
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("operation must be an object")
+        op_name = string_value(operation.get("op")).lower().replace("-", "_")
+        if op_name == "replace":
+            remove_id = string_value(operation.get("remove") or operation.get("remove_segment_id"))
+            add_id = string_value(operation.get("add") or operation.get("add_segment_id"))
+            if remove_id not in selected_ids:
+                raise ValueError(f"replace remove id not selected: {remove_id}")
+            validate_review_segment_ids([add_id], allowed_ids)
+            selected_ids[selected_ids.index(remove_id)] = add_id
+        elif op_name == "remove":
+            segment_id = string_value(operation.get("segment_id") or operation.get("remove"))
+            if segment_id not in selected_ids:
+                raise ValueError(f"remove id not selected: {segment_id}")
+            selected_ids = [item for item in selected_ids if item != segment_id]
+        elif op_name == "reorder":
+            order = [str(item).strip() for item in listify(operation.get("segment_ids") or operation.get("order")) if str(item).strip()]
+            if set(order) != set(selected_ids) or len(order) != len(selected_ids):
+                raise ValueError("reorder must contain exactly the current selected segment ids")
+            selected_ids = order
+        else:
+            raise ValueError(f"Unsupported review operation: {op_name}")
+    validate_review_segment_ids(selected_ids, allowed_ids)
+    return selected_ids
+
+
+def validate_review_segment_ids(segment_ids: list[str], allowed_ids: set[str]) -> None:
+    if not segment_ids:
+        raise ValueError("review result selects no segments")
+    duplicates = [segment_id for segment_id, count in Counter(segment_ids).items() if count > 1]
+    if duplicates:
+        raise ValueError(f"duplicate selected segment ids: {', '.join(duplicates)}")
+    unknown = [segment_id for segment_id in segment_ids if segment_id not in allowed_ids]
+    if unknown:
+        raise ValueError(f"segment ids are outside review packet: {', '.join(unknown)}")
+
+
+def validate_selected_candidates(selected: list[dict[str, Any]], target_duration: float, source_duration: float) -> list[str]:
+    errors = []
+    for candidate in selected:
+        if candidate.get("avoid_reason") not in (None, "", "none"):
+            errors.append(f"avoid_reason:{candidate.get('id', '')}:{candidate.get('avoid_reason')}")
+        if not candidate.get("is_standalone", True):
+            errors.append(f"not_standalone:{candidate.get('id', '')}")
+        if float(candidate.get("start", 0.0)) < 0 or float(candidate.get("end", 0.0)) <= float(candidate.get("start", 0.0)):
+            errors.append(f"invalid_candidate_bounds:{candidate.get('id', '')}")
+        if source_duration and float(candidate.get("end", 0.0)) > source_duration:
+            errors.append(f"candidate_outside_source:{candidate.get('id', '')}")
+    for index, left in enumerate(selected):
+        for right in selected[index + 1 :]:
+            if overlap_ratio(left, right) > 0.2:
+                errors.append(f"candidate_overlap:{left.get('id', '')}:{right.get('id', '')}")
+    selected_duration = sum(float(item.get("duration_sec", 0.0)) + DEFAULT_CLIP_PADDING * 2 for item in selected)
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    if selected_duration > hard_budget + 1.0:
+        errors.append(f"selected_duration_over_hard_budget:{round(selected_duration, 3)}>{round(hard_budget, 3)}")
+    return errors
+
+
+def build_edit_plan_from_selected(
+    base_plan: dict[str, Any],
+    selected: list[dict[str, Any]],
+    source_duration: float,
+    clip_padding: float,
+) -> dict[str, Any]:
+    padding = max(0.0, clip_padding)
+    padded_bounds = [
+        (
+            round(max(0.0, float(item["start"]) - padding), 3),
+            round(min(source_duration, float(item["end"]) + padding) if source_duration else float(item["end"]) + padding, 3),
+        )
+        for item in selected
+    ]
+    segments = []
+    for index, item in enumerate(selected):
+        role = "hook" if index == 0 else ("ending" if index == len(selected) - 1 else "highlight")
+        source_start, source_end = padded_bounds[index]
+        segments.append(
+            {
+                "segment_id": item["id"],
+                "role": role,
+                "source_start": source_start,
+                "source_end": source_end,
+                "duration_sec": round(source_end - source_start, 3),
+                "original_source_start": item["start"],
+                "original_source_end": item["end"],
+                "clip_padding_sec": clip_padding,
+                "title": item.get("title", item["id"]),
+                "reason": item.get("summary", ""),
+                "final_score": item.get("final_score"),
+            }
+        )
+    return {
+        **base_plan,
+        "version": "edit_plan_v1",
+        "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
+        "selected_segments": segments,
+    }
+
+
+def apply_codex_review(out_dir: Path, review_result_path: Optional[Path] = None) -> dict[str, Any]:
+    review_result_path = review_result_path or (out_dir / "codex_review_result.json")
+    if not review_result_path.exists():
+        raise SystemExit(f"Review result not found: {review_result_path}")
+    result = read_json(review_result_path)
+    if not isinstance(result, dict):
+        raise SystemExit("codex_review_result.json must be a JSON object")
+    current_plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    packet_path = out_dir / "gpt_review_packet.json"
+    if packet_path.exists():
+        packet = read_json(packet_path)
+    else:
+        packet = build_gpt_review_packet(out_dir)
+    allowed_ids = review_packet_allowed_ids(packet)
+    current_ids = [str(segment.get("segment_id")) for segment in current_plan.get("selected_segments", [])]
+    try:
+        selected_ids = review_result_selected_ids(result, current_ids, allowed_ids)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid review result: {exc}") from exc
+
+    if normalize_review_decision(result.get("decision")) == "approve" and selected_ids == current_ids:
+        applied = {
+            "version": "codex_review_apply_result_v1",
+            "decision": "approve",
+            "changed": False,
+            "selected_segment_ids": selected_ids,
+            "reason": string_value(result.get("reason")),
+        }
+        write_json(out_dir / "codex_review_apply_result.json", applied)
+        log("Review approved current edit_plan.json without changes.")
+        return applied
+
+    scored_by_id = {item.get("id"): item for item in scored}
+    selected = [scored_by_id[segment_id] for segment_id in selected_ids if segment_id in scored_by_id]
+    if len(selected) != len(selected_ids):
+        missing = [segment_id for segment_id in selected_ids if segment_id not in scored_by_id]
+        raise SystemExit(f"Selected segment ids missing from scored_segments.json: {', '.join(missing)}")
+    source_duration = source_duration_for_plan(out_dir, current_plan)
+    target_duration = float(current_plan.get("target_duration_sec", 0.0) or 0.0)
+    candidate_errors = validate_selected_candidates(selected, target_duration, source_duration)
+    if candidate_errors:
+        raise SystemExit("Invalid reviewed candidate selection: " + "; ".join(candidate_errors))
+    clip_padding = number_value(
+        current_plan.get("selected_segments", [{}])[0].get("clip_padding_sec") if current_plan.get("selected_segments") else None,
+        DEFAULT_CLIP_PADDING,
+    )
+    reviewed_plan = build_edit_plan_from_selected(current_plan, selected, source_duration, clip_padding)
+    plan_errors = validate_edit_plan(reviewed_plan, source_duration)
+    if plan_errors:
+        raise SystemExit("Reviewed edit_plan.json is invalid: " + "; ".join(plan_errors))
+
+    backup_path = out_dir / "edit_plan.before_codex_review.json"
+    shutil.copyfile(out_dir / "edit_plan.json", backup_path)
+    write_json(out_dir / "edit_plan.gpt_reviewed.json", reviewed_plan)
+    write_json(out_dir / "edit_plan.json", reviewed_plan)
+    write_review_report(out_dir)
+    confidence = compute_plan_confidence(out_dir)
+    build_gpt_review_packet(out_dir, confidence)
+    applied = {
+        "version": "codex_review_apply_result_v1",
+        "decision": normalize_review_decision(result.get("decision")),
+        "changed": True,
+        "selected_segment_ids": selected_ids,
+        "backup_path": str(backup_path),
+        "reviewed_plan_path": str(out_dir / "edit_plan.gpt_reviewed.json"),
+        "reason": string_value(result.get("reason")),
+        "post_apply_confidence": confidence,
+    }
+    write_json(out_dir / "codex_review_apply_result.json", applied)
+    log(f"Applied Codex review to {out_dir / 'edit_plan.json'}")
+    return applied
 
 
 def render_review_markdown(report: dict[str, Any]) -> str:
@@ -2731,6 +2951,16 @@ def command_review_gate(args: argparse.Namespace) -> dict[str, Any]:
     return confidence
 
 
+def command_apply_review(args: argparse.Namespace) -> None:
+    review_result_path = Path(args.review_result) if args.review_result else None
+    applied = apply_codex_review(Path(args.work_dir), review_result_path)
+    log(
+        "Review apply result: "
+        f"decision={applied['decision']} "
+        f"changed={applied['changed']}"
+    )
+
+
 def command_report(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
     report = write_review_report(out_dir)
@@ -2841,6 +3071,11 @@ def build_parser() -> argparse.ArgumentParser:
     review_gate.add_argument("work_dir", help="Work directory")
     review_gate.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
     review_gate.set_defaults(func=command_review_gate)
+
+    apply_review = subparsers.add_parser("apply-review", help="Validate and apply codex_review_result.json to edit_plan.json")
+    apply_review.add_argument("work_dir", help="Work directory")
+    apply_review.add_argument("--review-result", default="", help="Path to review result JSON; defaults to work_dir/codex_review_result.json")
+    apply_review.set_defaults(func=command_apply_review)
 
     report = subparsers.add_parser("report", help="Create review_report.md and review_report.json from the edit plan")
     report.add_argument("work_dir", help="Work directory")

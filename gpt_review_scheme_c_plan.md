@@ -41,12 +41,15 @@ Implemented first slice:
 - `gpt_review_packet.json`.
 - `run --review-mode auto|always|off`.
 - Codex CLI handoff for yellow/red without requiring an external API key.
+- `apply-review` command.
+- Validation and application of `codex_review_result.json`.
+- Backup of the previous plan to `edit_plan.before_codex_review.json` before reviewed changes are applied.
 
 Not implemented yet:
 
 - External OpenAI/GPT provider integration.
 - Automatic application of a remote GPT response.
-- Schema-driven apply step for yellow review or red rerank.
+- Remote-provider response fetching.
 
 ## Architecture Decisions
 

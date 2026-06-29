@@ -244,6 +244,46 @@ uv run python auto_highlight.py run input.mp4 \
 
 如果結果是 green，流程會繼續 render。如果結果是 yellow 或 red，程式會先停在 render 前，留下 `plan_confidence.json` 和 `gpt_review_packet.json`，讓 Codex CLI agent 讀 `edit_plan.json`、`scored_segments.json`、`review_report.json`、縮圖與 near misses 後接手判斷，不會停下來要求你提供 API key。
 
+Codex CLI 接手後，會寫一份 `codex_review_result.json`。接著用程式驗證並套用：
+
+```bash
+uv run python auto_highlight.py apply-review work/video1
+uv run python auto_highlight.py render work/video1
+```
+
+`apply-review` 會檢查 segment id、重疊、時長和來源範圍。通過後會備份原本的 `edit_plan.json` 成 `edit_plan.before_codex_review.json`，再更新新的 `edit_plan.json`。
+
+`codex_review_result.json` 可用這些格式：
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "approve",
+  "reason": "current plan is good"
+}
+```
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "revise",
+  "reason": "replace a weak ending with a stronger near miss",
+  "operations": [
+    {"op": "replace", "remove": "seg_010", "add": "seg_012"},
+    {"op": "reorder", "segment_ids": ["seg_000", "seg_012", "seg_008"]}
+  ]
+}
+```
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "rerank",
+  "reason": "red rescue plan",
+  "selected_segment_ids": ["seg_000", "seg_012", "seg_008"]
+}
+```
+
 相關長期實作計畫在：
 
 ```text

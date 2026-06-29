@@ -81,17 +81,47 @@ When a run reaches `yellow`:
 - Act as a constrained senior editor.
 - Only allow these changes: approve current plan, reorder selected segments, replace a selected segment with a near miss, or remove a weak segment.
 - Do not invent segment IDs or choose clips outside the available scored/near-miss candidates.
-- Before changing the plan, copy the current plan to `edit_plan.before_codex_review.json`.
-- Write a review result artifact such as `codex_review_result.json` explaining the decision and every change.
-- Render only after the reviewed `edit_plan.json` is valid.
+- Write `codex_review_result.json` explaining the decision and every change.
+- Run `uv run python auto_highlight.py apply-review <work-dir>` to validate and apply the result.
+- Render only after `apply-review` accepts the reviewed plan.
 
 When a run reaches `red`:
 
 - Read `scored_segments.json`, `review_report.json` or `review_report.md`, `project_focus.json`, and visual summaries/thumbnails if available.
 - Act as a rescue editor and rerank a bounded set of candidates, preferably the top 20 plus near misses.
-- Rebuild `edit_plan.json` only from existing candidate IDs and valid source time ranges.
-- Preserve the original plan as `edit_plan.before_codex_review.json`.
 - Write `codex_review_result.json` with the rejected local-plan issues, selected replacement segments, and reasoning.
-- Validate duration, overlap, source bounds, and segment IDs before rendering.
+- Run `uv run python auto_highlight.py apply-review <work-dir>` so the program rebuilds `edit_plan.json` only from existing candidate IDs and valid source time ranges.
+- Render only after `apply-review` validates duration, overlap, source bounds, and segment IDs.
+
+Use this review result schema:
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "approve",
+  "reason": "current plan is good"
+}
+```
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "revise",
+  "reason": "replace weak segment with a stronger near miss",
+  "operations": [
+    {"op": "replace", "remove": "seg_010", "add": "seg_012"},
+    {"op": "reorder", "segment_ids": ["seg_000", "seg_012", "seg_008"]}
+  ]
+}
+```
+
+```json
+{
+  "version": "codex_review_result_v1",
+  "decision": "rerank",
+  "reason": "red rescue plan",
+  "selected_segment_ids": ["seg_000", "seg_012", "seg_008"]
+}
+```
 
 Do not use stale artifacts silently. If `scored_segments.json`, `visual_segments.json`, `review_report.json`, or thumbnails are missing or clearly from an older run, regenerate the relevant pipeline stage before reviewing. Generated media and `work/` outputs should not be committed.

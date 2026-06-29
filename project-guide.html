@@ -988,7 +988,7 @@
               <span class="step-number">3</span>
               <div>
                 <h3>想慢慢檢查，就分段執行</h3>
-                <p class="muted">如果影片很長，建議分成六步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
+                <p class="muted">如果影片很長，建議分段執行。每一步會留下檔案，方便你知道程式做到哪裡。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1000,12 +1000,13 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py apply-review work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
 uv run python auto_highlight.py review-gate work/video1
+uv run python auto_highlight.py apply-review work/video1
 uv run python auto_highlight.py render work/video1</code></pre>
             </div>
           </article>
@@ -1236,7 +1237,7 @@ ollama pull qwen2.5vl:7b</code></pre>
                 </svg>
               </span>
               <h3>7. 信心檢查</h3>
-              <p class="muted">用 green/yellow/red 判斷剪輯計畫是否穩；yellow 或 red 時由 Codex CLI 接手審稿，不需要另外填 API key。</p>
+              <p class="muted">用 green/yellow/red 判斷剪輯計畫是否穩；yellow 或 red 時由 Codex CLI 接手審稿，再用 apply-review 驗證套用。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">

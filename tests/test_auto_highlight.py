@@ -877,6 +877,121 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(len(packet["top_candidates"]), 2)
         self.assertEqual(packet["selected_segments"][0]["candidate"]["segment_id"], "seg_001")
 
+    def test_apply_codex_review_approve_keeps_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 120})
+            plan = {
+                "version": "edit_plan_v1",
+                "source_video": "/tmp/input.mp4",
+                "output_video": "/tmp/highlight.mp4",
+                "target_duration_sec": 60,
+                "selected_duration_sec": 50,
+                "selected_segments": [
+                    {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 65, "duration_sec": 25, "clip_padding_sec": 2.5},
+                ],
+            }
+            scored = [
+                {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "結尾", "summary": "保留", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+            ]
+            ah.write_json(tmp_path / "edit_plan.json", plan)
+            ah.write_json(tmp_path / "scored_segments.json", scored)
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(tmp_path / "codex_review_result.json", {"version": "codex_review_result_v1", "decision": "approve", "reason": "current plan is good"})
+
+            applied = ah.apply_codex_review(tmp_path)
+
+            self.assertFalse(applied["changed"])
+            self.assertEqual(ah.read_json(tmp_path / "edit_plan.json"), plan)
+            self.assertFalse((tmp_path / "edit_plan.before_codex_review.json").exists())
+
+    def test_apply_codex_review_replace_and_reorder_updates_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 160})
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 50,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 65, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                    {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "弱結尾", "summary": "替換", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "弱", "signals": {}},
+                    {"id": "seg_003", "start": 92.5, "end": 112.5, "duration_sec": 20, "title": "更好結尾", "summary": "更好", "final_score": 7.5, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "好", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(
+                tmp_path / "codex_review_result.json",
+                {
+                    "version": "codex_review_result_v1",
+                    "decision": "revise",
+                    "reason": "replace weak ending and put the stronger ending first",
+                    "operations": [
+                        {"op": "replace", "remove": "seg_002", "add": "seg_003"},
+                        {"op": "reorder", "segment_ids": ["seg_003", "seg_001"]},
+                    ],
+                },
+            )
+
+            applied = ah.apply_codex_review(tmp_path)
+            updated = ah.read_json(tmp_path / "edit_plan.json")
+
+            self.assertTrue(applied["changed"])
+            self.assertTrue((tmp_path / "edit_plan.before_codex_review.json").exists())
+            self.assertTrue((tmp_path / "edit_plan.gpt_reviewed.json").exists())
+            self.assertEqual([segment["segment_id"] for segment in updated["selected_segments"]], ["seg_003", "seg_001"])
+            self.assertEqual(updated["selected_segments"][0]["role"], "hook")
+            self.assertTrue((tmp_path / "codex_review_apply_result.json").exists())
+
+    def test_apply_codex_review_rejects_segment_outside_packet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 120})
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 25,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(
+                tmp_path / "codex_review_result.json",
+                {"version": "codex_review_result_v1", "decision": "rerank", "selected_segment_ids": ["seg_999"], "reason": "invalid"},
+            )
+
+            with self.assertRaises(SystemExit):
+                ah.apply_codex_review(tmp_path)
+
     def test_contact_sheet_inputs_uses_middle_thumbnail_for_selected_and_near_miss(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
