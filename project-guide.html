@@ -966,20 +966,20 @@
               <span class="step-number">2</span>
               <div>
                 <h3>一行指令跑完整流程</h3>
-                <p class="muted">最簡單的方式是用 <code>run</code>。下面例子會做出大約 180 秒的精華影片，並用 <code>qwen2.5vl:7b</code> 看縮圖。</p>
+                <p class="muted">最簡單的方式是用 <code>run</code>。下面例子會做出大約 180 秒的精華影片，用 <code>qwen2.5vl:7b</code> 看縮圖，並用 <code>qwen3:1.7b</code> 幫文字片段打分。</p>
               </div>
             </div>
             <div class="mini-art">
               <div class="terminal-art" aria-label="終端機指令示意">
-                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b<br>
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b<br>
                 → 讀影片<br>
                 → 找片段<br>
                 → 輸出 highlight.mp4
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b">複製</button>
-              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b</code></pre>
             </div>
           </article>
 
@@ -988,7 +988,7 @@
               <span class="step-number">3</span>
               <div>
                 <h3>想慢慢檢查，就分段執行</h3>
-                <p class="muted">如果影片很長，建議分成四步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
+                <p class="muted">如果影片很長，建議分成五步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1000,10 +1000,10 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner heuristic&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py render work/video1">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
-uv run python auto_highlight.py score work/video1 --planner heuristic
+uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
 uv run python auto_highlight.py render work/video1</code></pre>
             </div>
@@ -1091,11 +1091,11 @@ uv run python auto_highlight.py render work/video1</code></pre>
                 <pre><code>brew install ffmpeg uv
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可到官方網站下載，或用 Homebrew 安裝。<code>qwen2.5:3b</code> 用來看文字片段，<code>qwen2.5vl:7b</code> 用來描述縮圖。</p>
+              <p class="muted">Ollama 可到官方網站下載，或用 Homebrew 安裝。<code>qwen3:1.7b</code> 用來看文字片段，<code>qwen2.5vl:7b</code> 用來描述縮圖。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="brew install ollama&#10;ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <button class="copy-btn" type="button" data-copy="brew install ollama&#10;ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
                 <pre><code>brew install ollama
-ollama pull qwen2.5:3b
+ollama pull qwen3:1.7b
 ollama pull qwen2.5vl:7b</code></pre>
               </div>
             </div>
@@ -1109,10 +1109,10 @@ ollama pull qwen2.5vl:7b</code></pre>
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可以從官方網站下載 Windows 版，裝好後再拉模型。<code>qwen2.5:3b</code> 看文字，<code>qwen2.5vl:7b</code> 看縮圖。</p>
+              <p class="muted">Ollama 可以從官方網站下載 Windows 版，裝好後再拉模型。<code>qwen3:1.7b</code> 看文字，<code>qwen2.5vl:7b</code> 看縮圖。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>ollama pull qwen2.5:3b
+                <button class="copy-btn" type="button" data-copy="ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <pre><code>ollama pull qwen3:1.7b
 ollama pull qwen2.5vl:7b</code></pre>
               </div>
             </div>
@@ -1127,11 +1127,11 @@ sudo apt install ffmpeg python3 python3-pip
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 是可選項，需要本機模型時再裝。文字打分用 <code>qwen2.5:3b</code>，縮圖描述用 <code>qwen2.5vl:7b</code>。</p>
+              <p class="muted">Ollama 是可選項，需要本機模型時再裝。文字打分用 <code>qwen3:1.7b</code>，縮圖描述用 <code>qwen2.5vl:7b</code>。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="curl -fsSL https://ollama.com/install.sh | sh&#10;ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <button class="copy-btn" type="button" data-copy="curl -fsSL https://ollama.com/install.sh | sh&#10;ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
                 <pre><code>curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:3b
+ollama pull qwen3:1.7b
 ollama pull qwen2.5vl:7b</code></pre>
               </div>
             </div>
@@ -1204,11 +1204,20 @@ ollama pull qwen2.5vl:7b</code></pre>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 6h16v12H4z"></path><path d="M8 10h8"></path><path d="M8 14h5"></path>
+                </svg>
+              </span>
+              <h3>4. 建立分析版影片</h3>
+              <p class="muted">如果要看縮圖，會先產生 output 等級的 analysis_video.mp4，再從這個較小的 proxy 抽畫面。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M4 19V5"></path><path d="M8 17V9"></path><path d="M12 17V7"></path><path d="M16 17v-5"></path><path d="M20 17V4"></path>
                 </svg>
               </span>
-              <h3>4. 幫片段打分</h3>
-              <p class="muted">看關鍵字、說話密度、情緒字、地點字，也可請 Ollama 補充判斷。</p>
+              <h3>5. 幫片段打分</h3>
+              <p class="muted">看關鍵字、說話密度、情緒字、地點字，也可用 qwen3:1.7b 等本機模型補充判斷。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
@@ -1216,7 +1225,7 @@ ollama pull qwen2.5vl:7b</code></pre>
                   <path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>
                 </svg>
               </span>
-              <h3>5. 排成剪輯計畫</h3>
+              <h3>6. 排成剪輯計畫</h3>
               <p class="muted">挑高分片段，避免重複，盡量接近目標秒數。</p>
             </article>
             <article class="flow-step">
@@ -1225,7 +1234,7 @@ ollama pull qwen2.5vl:7b</code></pre>
                   <path d="M4 4h16v16H4z"></path><path d="M10 8l6 4-6 4z"></path>
                 </svg>
               </span>
-              <h3>6. 輸出影片</h3>
+              <h3>7. 輸出影片</h3>
               <p class="muted">ffmpeg 依照 edit_plan.json 切片、淡入淡出、合成 highlight.mp4。</p>
             </article>
           </div>

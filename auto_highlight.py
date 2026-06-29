@@ -112,6 +112,7 @@ DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
+DEFAULT_TEXT_MODEL = "qwen3:1.7b"
 DEFAULT_TARGET_RETENTION_RATIO = 0.30
 MAX_SELECTED_SEGMENTS = 10
 TARGET_SEGMENT_SECONDS = 24.0
@@ -126,6 +127,7 @@ CONTACT_SHEET_LABELS = {
 }
 GENERATED_ARTIFACT_FILES = [
     "audio.wav",
+    "analysis_video.mp4",
     "transcript.json",
     "candidates.json",
     "visual_segments.json",
@@ -792,6 +794,37 @@ def extract_quality_frame(source_video: Path, timestamp: float) -> bytes:
     )
 
 
+def ensure_analysis_video(source_video: Path, out_dir: Path, output_size: str = DEFAULT_OUTPUT_SIZE) -> Path:
+    analysis_video = out_dir / "analysis_video.mp4"
+    if analysis_video.exists():
+        return analysis_video
+    require_tool("ffmpeg")
+    log(f"Creating analysis proxy: {analysis_video}")
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            f"scale={output_size}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "30",
+            "-movflags",
+            "+faststart",
+            str(analysis_video),
+        ]
+    )
+    return analysis_video
+
+
 def extract_thumbnail(source_video: Path, timestamp: float, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     run_command(
@@ -1039,13 +1072,15 @@ def analyze_visuals(
     ocr_languages: str = "chi_tra+eng",
     vision_model: str = "",
     ollama_url: str = "http://127.0.0.1:11434",
+    output_size: str = DEFAULT_OUTPUT_SIZE,
 ) -> list[dict[str, Any]]:
     require_tool("ffmpeg")
     source = read_json(out_dir / "source.json")
     candidates = read_json(out_dir / "candidates.json")
     source_video = Path(source["source_video"])
+    analysis_video = ensure_analysis_video(source_video, out_dir, output_size)
     visual_segments = [
-        analyze_candidate_visuals(source_video, out_dir, candidate, thumbnail_count, ocr_languages, vision_model, ollama_url)
+        analyze_candidate_visuals(analysis_video, out_dir, candidate, thumbnail_count, ocr_languages, vision_model, ollama_url)
         for candidate in candidates
     ]
     write_json(out_dir / "visual_segments.json", visual_segments)
@@ -1607,16 +1642,78 @@ def final_score_from_scores(heuristic: dict[str, float], llm_scores: Optional[di
     )
 
 
+def compact_candidate_for_llm(candidate: dict[str, Any]) -> dict[str, Any]:
+    signals = candidate.get("signals", {})
+    vision = signals.get("vision", {}) if isinstance(signals.get("vision"), dict) else {}
+    vision_summary = vision.get("summary", {}) if isinstance(vision.get("summary"), dict) else {}
+    captions = vision.get("captions", []) if isinstance(vision.get("captions"), list) else []
+    compact_captions = [
+        {
+            "time": caption.get("time"),
+            "description": caption.get("description", ""),
+            "subjects": caption.get("subjects", []),
+            "setting": caption.get("setting", ""),
+            "actions": caption.get("actions", []),
+            "visual_hook": caption.get("visual_hook", ""),
+        }
+        for caption in captions[:3]
+        if isinstance(caption, dict)
+    ]
+    return {
+        "id": candidate.get("id"),
+        "start": candidate.get("start"),
+        "end": candidate.get("end"),
+        "duration_sec": candidate.get("duration_sec"),
+        "transcript": candidate.get("transcript", ""),
+        "audio_text_signals": {
+            "keywords": signals.get("keywords", []),
+            "emotion_words": signals.get("emotion_words", []),
+            "place_words": signals.get("place_words", []),
+            "speech_density": signals.get("speech_density"),
+            "utterance_count": signals.get("utterance_count"),
+        },
+        "visual": {
+            "description": vision_summary.get("description", ""),
+            "subjects": vision_summary.get("subjects", []),
+            "stable_subjects": vision_summary.get("stable_subjects", []),
+            "visual_hooks": vision_summary.get("visual_hooks", []),
+            "captions": compact_captions,
+        },
+        "focus": signals.get("focus", {}),
+    }
+
+
+def run_ollama_chat_text(model: str, prompt: dict[str, Any], ollama_url: str = "http://127.0.0.1:11434", timeout_sec: float = 180.0) -> str:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.1},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        ollama_url.rstrip("/") + "/api/chat",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with request.urlopen(req, timeout=timeout_sec) as response:
+        raw = json.loads(response.read().decode("utf-8"))
+    return str(raw.get("message", {}).get("content", ""))
+
+
 def score_with_ollama(candidate: dict[str, Any], model: str) -> dict[str, Any]:
     prompt = {
-        "task": "Score this highlight candidate. Return JSON only with id, summary, title, tags, scores, is_standalone, avoid_reason.",
+        "task": "Score this highlight candidate for a short video edit. Return valid JSON only with id, summary, title, tags, scores, is_standalone, avoid_reason.",
         "rubric": {
             "scores": "0 to 10 for hook, fun, interaction, place, emotion, clarity",
             "avoid_reason": "Use 'none' if usable.",
+            "notes": "Prefer moments with clear visual action, viewer reaction, animal interaction, coherent context, and standalone value. Penalize unclear, repetitive, or weak moments.",
         },
-        "candidate": candidate,
+        "candidate": compact_candidate_for_llm(candidate),
     }
-    output = run_capture(["ollama", "run", model, json.dumps(prompt, ensure_ascii=False)])
+    output = run_ollama_chat_text(model, prompt)
     parsed = parse_first_json(output)
     heuristic = heuristic_scores(candidate)
     llm_scores = normalize_llm_scores(parsed.get("scores", {}))
@@ -1636,14 +1733,15 @@ def score_with_ollama(candidate: dict[str, Any], model: str) -> dict[str, Any]:
 
 
 def parse_first_json(text: str) -> dict[str, Any]:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found")
-    data = json.loads(text[start : end + 1])
-    if not isinstance(data, dict):
-        raise ValueError("Expected JSON object")
-    return data
+    decoder = json.JSONDecoder(strict=False)
+    for match in re.finditer(r"\{", text):
+        try:
+            data, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise ValueError("No JSON object found")
 
 
 def score_candidates(candidates: list[dict[str, Any]], planner: str, model: str) -> list[dict[str, Any]]:
@@ -2346,6 +2444,7 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
         args.ocr_languages,
         args.vision_model,
         args.ollama_url,
+        args.output_size,
     )
     log(f"Wrote visual metadata for {len(visual_segments)} candidates to {Path(args.work_dir) / 'visual_segments.json'}")
 
@@ -2388,6 +2487,7 @@ def command_run(args: argparse.Namespace) -> None:
                 ocr_languages=args.ocr_languages,
                 vision_model=args.vision_model,
                 ollama_url=args.ollama_url,
+                output_size=args.output_size,
             )
         )
     score_args = argparse.Namespace(
@@ -2432,7 +2532,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = subparsers.add_parser("score", help="Score candidate segments")
     score.add_argument("work_dir", help="Work directory")
     score.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    score.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
+    score.add_argument("--model", default=DEFAULT_TEXT_MODEL, help="Ollama model")
     score.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     score.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     score.set_defaults(func=command_score)
@@ -2443,6 +2543,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_visuals_parser.add_argument("--ocr-languages", default="chi_tra+eng")
     analyze_visuals_parser.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
     analyze_visuals_parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    analyze_visuals_parser.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Analysis proxy maximum size as WIDTHxHEIGHT")
     analyze_visuals_parser.set_defaults(func=command_analyze_visuals)
 
     plan = subparsers.add_parser("plan", help="Create edit_plan.json from scored segments")
@@ -2472,7 +2573,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     run.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     run.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    run.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
+    run.add_argument("--model", default=DEFAULT_TEXT_MODEL, help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     run.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
     run.add_argument("--visuals", action="store_true", help="Analyze thumbnails and optional OCR before scoring")
