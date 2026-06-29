@@ -24,6 +24,7 @@ output/
 .env.*
 *.log
 .DS_Store
+AGENTS.md
 
 # Editor files
 .idea/

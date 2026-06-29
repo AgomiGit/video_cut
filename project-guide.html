@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Auto Highlight Editor 專案說明</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f5ef;
+      --surface: #ffffff;
+      --surface-soft: #f0eee7;
+      --ink: #1f2933;
+      --muted: #68737d;
+      --line: #d8d2c4;
+      --accent: #147d70;
+      --accent-dark: #0d5f56;
+      --accent-soft: #dcefeb;
+      --mark: #d97706;
+      --mark-soft: #fff2d8;
+      --blue: #2f6f9f;
+      --blue-soft: #e0ecf5;
+      --danger: #a13b36;
+      --shadow: 0 14px 34px rgba(31, 41, 51, 0.09);
+      --radius: 8px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    a {
+      color: var(--accent-dark);
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: -4rem;
+      z-index: 20;
+      background: var(--ink);
+      color: #fff;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      transition: top 0.2s ease;
+    }
+
+    .skip-link:focus {
+      top: 1rem;
+    }
+
+    .page-shell {
+      min-height: 100vh;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(216, 210, 196, 0.9);
+      background: rgba(247, 245, 239, 0.94);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0.75rem 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      min-width: 13rem;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .brand-mark {
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 7px;
+      background: var(--accent);
+      display: grid;
+      place-items: center;
+      color: #fff;
+      box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.14);
+      flex: 0 0 auto;
+    }
+
+    .brand-mark svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.375rem;
+    }
+
+    .nav a {
+      text-decoration: none;
+      color: var(--muted);
+      padding: 0.45rem 0.625rem;
+      border-radius: 6px;
+      font-size: 0.92rem;
+      font-weight: 650;
+    }
+
+    .nav a:hover,
+    .nav a:focus-visible,
+    .nav a.active {
+      color: var(--ink);
+      background: var(--surface-soft);
+      outline: none;
+    }
+
+    .hero {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 3rem 1.25rem 1.25rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(20rem, 0.95fr);
+      gap: 2rem;
+      align-items: center;
+    }
+
+    .hero-copy {
+      max-width: 43rem;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.75rem;
+      color: var(--accent-dark);
+      font-weight: 760;
+      font-size: 0.9rem;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.18;
+      letter-spacing: 0;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(2.35rem, 5vw, 4.6rem);
+      max-width: 13ch;
+    }
+
+    h2 {
+      font-size: clamp(1.8rem, 3vw, 2.55rem);
+      margin-bottom: 0.75rem;
+    }
+
+    h3 {
+      font-size: 1.15rem;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .hero-lede {
+      margin-top: 1.125rem;
+      max-width: 38rem;
+      color: #41505b;
+      font-size: 1.08rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+
+    .button {
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 0.7rem 0.95rem;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 760;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-height: 2.75rem;
+    }
+
+    .button.secondary {
+      background: var(--surface);
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .button:hover,
+    .button:focus-visible {
+      transform: translateY(-1px);
+      box-shadow: 0 9px 20px rgba(20, 125, 112, 0.16);
+      outline: none;
+    }
+
+    .hero-visual {
+      background: #151d22;
+      color: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(31, 41, 51, 0.14);
+    }
+
+    .video-frame {
+      aspect-ratio: 16 / 10;
+      padding: 1rem;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 1rem;
+      background:
+        linear-gradient(135deg, rgba(20, 125, 112, 0.35), transparent 45%),
+        linear-gradient(180deg, #24313a, #151d22);
+    }
+
+    .screen {
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 7px;
+      background: #0f1519;
+      padding: 0.85rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0.625rem;
+      min-height: 13rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .clip-thumb {
+      border-radius: 6px;
+      background: var(--clip-bg);
+      min-height: 7rem;
+      position: relative;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .clip-thumb::before {
+      content: "";
+      position: absolute;
+      left: 0.75rem;
+      right: 0.75rem;
+      top: 0.75rem;
+      height: 0.5rem;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    .clip-thumb::after {
+      content: "";
+      position: absolute;
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 50%;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(255, 255, 255, 0.82);
+      clip-path: polygon(34% 24%, 34% 76%, 78% 50%);
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: 2fr 1.2fr 1.7fr 0.8fr;
+      gap: 0.4rem;
+      height: 2.4rem;
+    }
+
+    .timeline span {
+      border-radius: 5px;
+      background: var(--accent);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .timeline span:nth-child(2) {
+      background: var(--mark);
+    }
+
+    .timeline span:nth-child(3) {
+      background: var(--blue);
+    }
+
+    .timeline span::after {
+      content: "";
+      position: absolute;
+      inset: 0.35rem;
+      border-top: 2px dashed rgba(255, 255, 255, 0.7);
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 1rem 1.25rem 4rem;
+    }
+
+    .section {
+      padding: 3.25rem 0 0;
+      scroll-margin-top: 5rem;
+    }
+
+    .section-intro {
+      max-width: 48rem;
+      color: #41505b;
+      margin-bottom: 1.5rem;
+    }
+
+    .quick-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+
+    .info-card,
+    .step-card,
+    .tool-card,
+    .explain-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 22px rgba(31, 41, 51, 0.05);
+    }
+
+    .info-card {
+      padding: 1rem;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.75rem;
+      align-items: start;
+    }
+
+    .icon-box {
+      width: 2.35rem;
+      height: 2.35rem;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: var(--accent-soft);
+      color: var(--accent-dark);
+      flex: 0 0 auto;
+    }
+
+    .icon-box svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+
+    .info-card strong,
+    .tool-card strong {
+      display: block;
+      margin-bottom: 0.2rem;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .step-card {
+      padding: 1.1rem;
+      display: grid;
+      gap: 0.875rem;
+    }
+
+    .step-head {
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+    }
+
+    .step-number {
+      width: 2rem;
+      height: 2rem;
+      display: grid;
+      place-items: center;
+      background: var(--ink);
+      color: #fff;
+      border-radius: 6px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .mini-art {
+      min-height: 8.5rem;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-soft);
+      display: grid;
+      place-items: center;
+      padding: 0.75rem;
+    }
+
+    .folder-art,
+    .score-art,
+    .film-art,
+    .terminal-art {
+      width: min(100%, 21rem);
+    }
+
+    .folder-art {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+
+    .file-shape {
+      height: 3.25rem;
+      border: 1px solid #c9c1b1;
+      border-radius: 6px;
+      background: #fff;
+      padding: 0.45rem;
+    }
+
+    .file-shape span {
+      display: block;
+      height: 0.35rem;
+      border-radius: 999px;
+      background: #bcc6c7;
+      margin-bottom: 0.4rem;
+    }
+
+    .file-shape span:nth-child(2) {
+      width: 68%;
+    }
+
+    .terminal-art {
+      background: #172025;
+      color: #d5f5ef;
+      border-radius: 7px;
+      padding: 0.8rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      overflow: auto;
+    }
+
+    .score-art {
+      display: grid;
+      gap: 0.55rem;
+    }
+
+    .score-row {
+      display: grid;
+      grid-template-columns: 4.5rem 1fr 2rem;
+      gap: 0.5rem;
+      align-items: center;
+      font-size: 0.86rem;
+    }
+
+    .score-bar {
+      height: 0.75rem;
+      border-radius: 999px;
+      background: #d7d1c4;
+      overflow: hidden;
+    }
+
+    .score-bar span {
+      display: block;
+      height: 100%;
+      width: var(--value);
+      background: var(--accent);
+    }
+
+    .film-art {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.35rem;
+      padding: 0.45rem;
+      background: #172025;
+      border-radius: 7px;
+    }
+
+    .film-art span {
+      aspect-ratio: 3 / 4;
+      border-radius: 4px;
+      background: var(--film-bg);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+
+    .code-box {
+      position: relative;
+      margin: 0.75rem 0 0;
+      border-radius: 7px;
+      border: 1px solid #233139;
+      background: #12191e;
+      color: #d9f0ec;
+      overflow: hidden;
+    }
+
+    .code-box pre {
+      margin: 0;
+      padding: 1rem;
+      overflow: auto;
+      font-size: 0.9rem;
+      line-height: 1.55;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      border-radius: 6px;
+      padding: 0.35rem 0.55rem;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+
+    .copy-btn:focus-visible {
+      outline: 2px solid #fff;
+      outline-offset: 2px;
+    }
+
+    .install-layout {
+      display: grid;
+      grid-template-columns: 0.85fr 1.15fr;
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .tool-list {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .tool-card {
+      padding: 1rem;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.75rem;
+    }
+
+    .tabs {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .tab-list {
+      display: flex;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
+      overflow-x: auto;
+    }
+
+    .tab-button {
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      padding: 0.75rem 1rem;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .tab-button[aria-selected="true"] {
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    .tab-panel {
+      padding: 1rem;
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
+    .callout {
+      border-left: 4px solid var(--mark);
+      background: var(--mark-soft);
+      padding: 0.9rem 1rem;
+      border-radius: 0 7px 7px 0;
+      margin-top: 1rem;
+    }
+
+    .flow-wrap {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1rem;
+      overflow-x: auto;
+    }
+
+    .flow {
+      min-width: 860px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 0.75rem;
+      align-items: stretch;
+      position: relative;
+    }
+
+    .flow-step {
+      min-height: 10.5rem;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      padding: 0.85rem;
+      display: grid;
+      align-content: start;
+      gap: 0.55rem;
+      position: relative;
+    }
+
+    .flow-step::after {
+      content: "→";
+      position: absolute;
+      right: -0.67rem;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1.25rem;
+      height: 1.25rem;
+      display: grid;
+      place-items: center;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 50%;
+      font-weight: 800;
+      z-index: 2;
+    }
+
+    .flow-step:last-child::after {
+      display: none;
+    }
+
+    .flow-icon {
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .flow-icon svg {
+      width: 1.45rem;
+      height: 1.45rem;
+    }
+
+    .explain-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .explain-card {
+      padding: 1rem;
+    }
+
+    .formula {
+      display: block;
+      margin-top: 0.75rem;
+      background: var(--surface-soft);
+      border-radius: 7px;
+      padding: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      color: #26333b;
+      overflow-x: auto;
+    }
+
+    .simple-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: table;
+    }
+
+    .simple-table th,
+    .simple-table td {
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      padding: 0.8rem;
+      vertical-align: top;
+    }
+
+    .simple-table th {
+      background: var(--surface-soft);
+      font-size: 0.9rem;
+    }
+
+    .simple-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .footer {
+      border-top: 1px solid var(--line);
+      padding: 2rem 1.25rem;
+      color: var(--muted);
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    @media (max-width: 920px) {
+      .topbar-inner,
+      .hero {
+        align-items: flex-start;
+      }
+
+      .topbar-inner,
+      .hero,
+      .install-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar-inner {
+        display: grid;
+      }
+
+      .nav {
+        justify-content: flex-start;
+      }
+
+      .hero {
+        padding-top: 2rem;
+      }
+
+      .quick-grid,
+      .steps,
+      .explain-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 620px) {
+      body {
+        font-size: 15px;
+      }
+
+      .topbar {
+        position: static;
+      }
+
+      .hero,
+      main {
+        padding-left: 1rem;
+        padding-right: 1rem;
+      }
+
+      .nav {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        width: 100%;
+      }
+
+      .nav a {
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .screen {
+        grid-template-columns: 1fr;
+      }
+
+      .clip-thumb {
+        min-height: 4.25rem;
+      }
+
+      .simple-table,
+      .simple-table tbody,
+      .simple-table tr,
+      .simple-table th,
+      .simple-table td {
+        display: block;
+      }
+
+      .simple-table thead {
+        display: none;
+      }
+
+      .simple-table tr {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .simple-table td {
+        border-bottom: 0;
+      }
+
+      .simple-table td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-weight: 760;
+        margin-bottom: 0.2rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要內容</a>
+  <div class="page-shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand" aria-label="Auto Highlight Editor">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 4h12v16H6z"></path>
+              <path d="M9 4v16M15 4v16M6 8h3M15 8h3M6 16h3M15 16h3"></path>
+            </svg>
+          </span>
+          <span>Auto Highlight Editor</span>
+        </div>
+        <nav class="nav" aria-label="頁面章節">
+          <a href="#use">剪片步驟</a>
+          <a href="#install">安裝工具</a>
+          <a href="#algorithm">演算法</a>
+          <a href="#files">輸出檔案</a>
+        </nav>
+      </div>
+    </header>
+
+    <section class="hero" aria-labelledby="page-title">
+      <div class="hero-copy">
+        <p class="eyebrow">給剛接觸程式與剪片的人看的專案文件</p>
+        <h1 id="page-title">用程式自動找出影片精華</h1>
+        <p class="hero-lede">
+          這個工具會先把影片變成文字和時間點，再找出「可能很有趣、很重要、很適合剪出來」的片段，最後用 ffmpeg 合成一支精華影片。
+        </p>
+        <div class="hero-actions">
+          <a class="button" href="#use">
+            <span aria-hidden="true">▶</span>
+            開始看怎麼用
+          </a>
+          <a class="button secondary" href="#algorithm">
+            <span aria-hidden="true">⌘</span>
+            看流程圖
+          </a>
+        </div>
+      </div>
+      <div class="hero-visual" aria-label="精華剪輯示意圖">
+        <div class="video-frame">
+          <div class="screen">
+            <span class="clip-thumb" style="--clip-bg:#315a6d"></span>
+            <span class="clip-thumb" style="--clip-bg:#8a6b2d"></span>
+            <span class="clip-thumb" style="--clip-bg:#2f746a"></span>
+          </div>
+          <div class="timeline" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <main id="main">
+      <section class="quick-grid" aria-label="專案重點">
+        <article class="info-card">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 4h16v12H4z"></path><path d="M8 20h8"></path><path d="M12 16v4"></path>
+            </svg>
+          </span>
+          <div>
+            <strong>本機優先</strong>
+            <p class="muted">主要工作在你的電腦上完成，不需要把整支影片丟給雲端 AI。</p>
+          </div>
+        </article>
+        <article class="info-card">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v18"></path><path d="M5 8h14"></path><path d="M5 16h14"></path>
+            </svg>
+          </span>
+          <div>
+            <strong>可以分段重跑</strong>
+            <p class="muted">準備、打分、排片、輸出可以分開做，失敗時不用全部重來。</p>
+          </div>
+        </article>
+        <article class="info-card">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 12h6l2-6 3 12 2-6h3"></path>
+            </svg>
+          </span>
+          <div>
+            <strong>先用規則省力</strong>
+            <p class="muted">先用關鍵字和說話密度縮小範圍，AI 只看比較有機會的片段。</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="section" id="use">
+        <h2>如何使用此工具剪片</h2>
+        <p class="section-intro">
+          你可以把它想成一位剪片助理：你給它原始影片，它先聽聲音、讀字幕、找亮點，再把精華片段接成新影片。
+        </p>
+
+        <div class="steps">
+          <article class="step-card">
+            <div class="step-head">
+              <span class="step-number">1</span>
+              <div>
+                <h3>把影片放到專案資料夾</h3>
+                <p class="muted">例如把手機影片放在專案根目錄，檔名可以是 <code>input.mp4</code> 或 <code>IMG_4935.MOV</code>。</p>
+              </div>
+            </div>
+            <div class="mini-art">
+              <div class="folder-art" aria-label="影片檔案和工作資料夾示意">
+                <div class="file-shape"><span></span><span></span><span></span></div>
+                <div class="file-shape"><span></span><span></span><span></span></div>
+                <div class="file-shape"><span></span><span></span><span></span></div>
+                <div class="file-shape"><span></span><span></span><span></span></div>
+              </div>
+            </div>
+            <div class="code-box">
+              <button class="copy-btn" type="button" data-copy="ls">複製</button>
+              <pre><code>ls</code></pre>
+            </div>
+          </article>
+
+          <article class="step-card">
+            <div class="step-head">
+              <span class="step-number">2</span>
+              <div>
+                <h3>一行指令跑完整流程</h3>
+                <p class="muted">最簡單的方式是用 <code>run</code>。下面例子會做出大約 180 秒的精華影片，並用 <code>qwen2.5vl:7b</code> 看縮圖。</p>
+              </div>
+            </div>
+            <div class="mini-art">
+              <div class="terminal-art" aria-label="終端機指令示意">
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b<br>
+                → 讀影片<br>
+                → 找片段<br>
+                → 輸出 highlight.mp4
+              </div>
+            </div>
+            <div class="code-box">
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b</code></pre>
+            </div>
+          </article>
+
+          <article class="step-card">
+            <div class="step-head">
+              <span class="step-number">3</span>
+              <div>
+                <h3>想慢慢檢查，就分段執行</h3>
+                <p class="muted">如果影片很長，建議分成四步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
+              </div>
+            </div>
+            <div class="mini-art">
+              <div class="score-art" aria-label="分段流程分數示意">
+                <div class="score-row"><span>prepare</span><span class="score-bar"><span style="--value:100%"></span></span><strong>1</strong></div>
+                <div class="score-row"><span>score</span><span class="score-bar"><span style="--value:76%"></span></span><strong>2</strong></div>
+                <div class="score-row"><span>plan</span><span class="score-bar"><span style="--value:58%"></span></span><strong>3</strong></div>
+                <div class="score-row"><span>render</span><span class="score-bar"><span style="--value:92%"></span></span><strong>4</strong></div>
+              </div>
+            </div>
+            <div class="code-box">
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner heuristic&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
+uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
+uv run python auto_highlight.py score work/video1 --planner heuristic
+uv run python auto_highlight.py plan work/video1 --target-duration 180
+uv run python auto_highlight.py render work/video1</code></pre>
+            </div>
+          </article>
+
+          <article class="step-card">
+            <div class="step-head">
+              <span class="step-number">4</span>
+              <div>
+                <h3>打開輸出的精華影片</h3>
+                <p class="muted">完成後，影片會在 <code>work/video1/output/highlight.mp4</code>。如果不滿意，可以調整秒數或重新跑分。</p>
+              </div>
+            </div>
+            <div class="mini-art">
+              <div class="film-art" aria-label="精華影片片段示意">
+                <span style="--film-bg:#2f6f9f"></span>
+                <span style="--film-bg:#147d70"></span>
+                <span style="--film-bg:#d97706"></span>
+                <span style="--film-bg:#5f6c72"></span>
+              </div>
+            </div>
+            <div class="code-box">
+              <button class="copy-btn" type="button" data-copy="open work/video1/output/highlight.mp4">複製</button>
+              <pre><code>open work/video1/output/highlight.mp4</code></pre>
+            </div>
+          </article>
+        </div>
+
+        <div class="callout">
+          <strong>小提醒：</strong>
+          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。
+        </div>
+      </section>
+
+      <section class="section" id="install">
+        <h2>事前需要安裝哪些工具</h2>
+        <p class="section-intro">
+          這個專案像一個小隊伍。Python 負責指揮，ffmpeg 負責處理影片，faster-whisper 負責把聲音變文字，Ollama 是可選的本機 AI 評審。
+        </p>
+
+        <div class="install-layout">
+          <div class="tool-list">
+            <article class="tool-card">
+              <span class="icon-box" aria-hidden="true">Py</span>
+              <div>
+                <strong>uv 與 Python</strong>
+                <p class="muted">用來執行 <code>auto_highlight.py</code>，也幫忙管理 Python 套件。</p>
+              </div>
+            </article>
+            <article class="tool-card">
+              <span class="icon-box" aria-hidden="true">FF</span>
+              <div>
+                <strong>ffmpeg / ffprobe</strong>
+                <p class="muted">把影片轉音訊、切片段、接影片、輸出 MP4。</p>
+              </div>
+            </article>
+            <article class="tool-card">
+              <span class="icon-box" aria-hidden="true">Wh</span>
+              <div>
+                <strong>faster-whisper</strong>
+                <p class="muted">聽影片聲音，產生有時間點的逐字稿。</p>
+              </div>
+            </article>
+            <article class="tool-card">
+              <span class="icon-box" aria-hidden="true">AI</span>
+              <div>
+                <strong>Ollama，可選</strong>
+                <p class="muted">如果你想用本機模型幫文字打分或描述縮圖，可以安裝它。</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="tabs" data-tabs>
+            <div class="tab-list" role="tablist" aria-label="安裝系統">
+              <button class="tab-button" type="button" role="tab" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
+              <button class="tab-button" type="button" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false">Windows</button>
+              <button class="tab-button" type="button" role="tab" id="tab-linux" aria-controls="panel-linux" aria-selected="false">Linux</button>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-mac" aria-labelledby="tab-mac">
+              <h3>macOS 安裝方式</h3>
+              <p class="muted">如果你有 Homebrew，安裝會比較簡單。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="brew install ffmpeg uv&#10;uv pip install faster-whisper">複製</button>
+                <pre><code>brew install ffmpeg uv
+uv pip install faster-whisper</code></pre>
+              </div>
+              <p class="muted">Ollama 可到官方網站下載，或用 Homebrew 安裝。<code>qwen3:6b</code> 用來看文字片段，<code>qwen2.5vl:7b</code> 用來描述縮圖。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="brew install ollama&#10;ollama pull qwen3:6b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <pre><code>brew install ollama
+ollama pull qwen3:6b
+ollama pull qwen2.5vl:7b</code></pre>
+              </div>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+              <h3>Windows 安裝方式</h3>
+              <p class="muted">建議先裝 Python，再用 PowerShell 安裝 uv。ffmpeg 可用 winget 安裝。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="winget install Gyan.FFmpeg&#10;powershell -ExecutionPolicy ByPass -c &quot;irm https://astral.sh/uv/install.ps1 | iex&quot;&#10;uv pip install faster-whisper">複製</button>
+                <pre><code>winget install Gyan.FFmpeg
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv pip install faster-whisper</code></pre>
+              </div>
+              <p class="muted">Ollama 可以從官方網站下載 Windows 版，裝好後再拉模型。<code>qwen3:6b</code> 看文字，<code>qwen2.5vl:7b</code> 看縮圖。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="ollama pull qwen3:6b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <pre><code>ollama pull qwen3:6b
+ollama pull qwen2.5vl:7b</code></pre>
+              </div>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
+              <h3>Linux 安裝方式</h3>
+              <p class="muted">下面以 Ubuntu / Debian 類系統為例。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="sudo apt update&#10;sudo apt install ffmpeg python3 python3-pip&#10;curl -LsSf https://astral.sh/uv/install.sh | sh&#10;uv pip install faster-whisper">複製</button>
+                <pre><code>sudo apt update
+sudo apt install ffmpeg python3 python3-pip
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv pip install faster-whisper</code></pre>
+              </div>
+              <p class="muted">Ollama 是可選項，需要本機模型時再裝。文字打分用 <code>qwen3:6b</code>，縮圖描述用 <code>qwen2.5vl:7b</code>。</p>
+              <div class="code-box">
+                <button class="copy-btn" type="button" data-copy="curl -fsSL https://ollama.com/install.sh | sh&#10;ollama pull qwen3:6b&#10;ollama pull qwen2.5vl:7b">複製</button>
+                <pre><code>curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3:6b
+ollama pull qwen2.5vl:7b</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <table class="simple-table" aria-label="工具檢查表">
+          <thead>
+            <tr>
+              <th>檢查項目</th>
+              <th>指令</th>
+              <th>看到什麼代表成功</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="檢查項目">ffmpeg</td>
+              <td data-label="指令"><code>ffmpeg -version</code></td>
+              <td data-label="看到什麼代表成功">出現版本號，不是 command not found。</td>
+            </tr>
+            <tr>
+              <td data-label="檢查項目">uv</td>
+              <td data-label="指令"><code>uv --version</code></td>
+              <td data-label="看到什麼代表成功">出現 uv 的版本號。</td>
+            </tr>
+            <tr>
+              <td data-label="檢查項目">Ollama，可選</td>
+              <td data-label="指令"><code>ollama list</code></td>
+              <td data-label="看到什麼代表成功">能列出模型，或至少沒有找不到指令。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section" id="algorithm">
+        <h2>此專案的演算法</h2>
+        <p class="section-intro">
+          演算法就是「做決定的方法」。這個工具不會直接叫 AI 看完整支影片，因為那樣很慢也很花錢。它會先用便宜的方法縮小範圍，再挑出最值得剪的地方。
+        </p>
+
+        <div class="flow-wrap" aria-label="演算法流程圖，可左右捲動">
+          <div class="flow">
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 3h14v18H5z"></path><path d="M9 7h6"></path><path d="M9 12h6"></path><path d="M9 17h4"></path>
+                </svg>
+              </span>
+              <h3>1. 讀影片</h3>
+              <p class="muted">用 ffprobe 確認影片長度，用 ffmpeg 抽出聲音。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"></path><path d="M19 10v1a7 7 0 0 1-14 0v-1"></path><path d="M12 18v3"></path>
+                </svg>
+              </span>
+              <h3>2. 聲音變文字</h3>
+              <p class="muted">faster-whisper 產生逐字稿，每句話都有開始和結束時間。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 5h16"></path><path d="M4 12h10"></path><path d="M4 19h16"></path><path d="M17 9l3 3-3 3"></path>
+                </svg>
+              </span>
+              <h3>3. 找候選片段</h3>
+              <p class="muted">看到「哇、你看、好吃、景點」等字，就把前後幾秒抓出來。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 19V5"></path><path d="M8 17V9"></path><path d="M12 17V7"></path><path d="M16 17v-5"></path><path d="M20 17V4"></path>
+                </svg>
+              </span>
+              <h3>4. 幫片段打分</h3>
+              <p class="muted">看關鍵字、說話密度、情緒字、地點字，也可請 Ollama 補充判斷。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>
+                </svg>
+              </span>
+              <h3>5. 排成剪輯計畫</h3>
+              <p class="muted">挑高分片段，避免重複，盡量接近目標秒數。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 4h16v16H4z"></path><path d="M10 8l6 4-6 4z"></path>
+                </svg>
+              </span>
+              <h3>6. 輸出影片</h3>
+              <p class="muted">ffmpeg 依照 edit_plan.json 切片、淡入淡出、合成 highlight.mp4。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="explain-grid">
+          <article class="explain-card">
+            <h3>候選片段是什麼？</h3>
+            <p class="muted">候選片段就是「可能值得剪出來」的一小段影片。程式不會一開始就決定它一定好，只是先把它放進待選名單。</p>
+          </article>
+          <article class="explain-card">
+            <h3>為什麼要合併？</h3>
+            <p class="muted">如果兩個候選片段距離很近，例如只差 5 秒，通常是同一件事，所以合在一起比較自然。</p>
+          </article>
+          <article class="explain-card">
+            <h3>分數怎麼想？</h3>
+            <p class="muted">像老師改考卷一樣，不只看一題。它會看好笑、互動、地點、清楚度、可不可以單獨看懂。</p>
+          </article>
+        </div>
+
+        <span class="formula" aria-label="簡化打分公式">
+          簡化想法：總分 = 關鍵字 + 說話密度 + 互動感 + 情緒 + 地點價值 - 品質扣分
+        </span>
+      </section>
+
+      <section class="section" id="files">
+        <h2>剪完後會看到哪些檔案</h2>
+        <p class="section-intro">
+          每次執行都會放在一個 <code>work/&lt;名字&gt;/</code> 資料夾。這些檔案像剪片過程的作業本，可以幫你檢查哪一步出了問題。
+        </p>
+
+        <table class="simple-table" aria-label="輸出檔案說明">
+          <thead>
+            <tr>
+              <th>檔案或資料夾</th>
+              <th>用途</th>
+              <th>用白話說</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="檔案或資料夾"><code>transcript.json</code></td>
+              <td data-label="用途">逐字稿和時間點</td>
+              <td data-label="用白話說">影片裡每句話大概在第幾秒說。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>candidates.json</code></td>
+              <td data-label="用途">候選片段</td>
+              <td data-label="用白話說">程式覺得「可能有料」的片段清單。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>scored_segments.json</code></td>
+              <td data-label="用途">片段分數</td>
+              <td data-label="用白話說">每段為什麼被看好，分數是多少。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>edit_plan.json</code></td>
+              <td data-label="用途">最後剪輯計畫</td>
+              <td data-label="用白話說">真正要剪哪幾段、順序怎麼排。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>output/highlight.mp4</code></td>
+              <td data-label="用途">完成影片</td>
+              <td data-label="用白話說">你最後要看的精華影片。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>本頁是此專案的入門說明文件。設計目標是讓第一次接觸自動剪片的人，也能知道要安裝什麼、怎麼執行、程式大概怎麼做決定。</p>
+    </footer>
+  </div>
+
+  <script>
+    const copyButtons = document.querySelectorAll("[data-copy]");
+    copyButtons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        const text = button.getAttribute("data-copy") || "";
+        try {
+          await navigator.clipboard.writeText(text);
+          const oldText = button.textContent;
+          button.textContent = "已複製";
+          window.setTimeout(() => {
+            button.textContent = oldText;
+          }, 1200);
+        } catch {
+          button.textContent = "請手動複製";
+        }
+      });
+    });
+
+    const tabButtons = document.querySelectorAll("[role='tab']");
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const tabList = button.closest("[data-tabs]");
+        const buttons = tabList.querySelectorAll("[role='tab']");
+        const panels = tabList.querySelectorAll("[role='tabpanel']");
+        buttons.forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+        panels.forEach((panel) => {
+          panel.hidden = panel.id !== button.getAttribute("aria-controls");
+        });
+      });
+    });
+
+    const navLinks = [...document.querySelectorAll(".nav a")];
+    const sections = navLinks
+      .map((link) => document.querySelector(link.getAttribute("href")))
+      .filter(Boolean);
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach((link) => {
+          link.classList.toggle("active", link.getAttribute("href") === `#${entry.target.id}`);
+        });
+      });
+    }, { rootMargin: "-40% 0px -55% 0px" });
+
+    sections.forEach((section) => observer.observe(section));
+  </script>
+</body>
+</html>
