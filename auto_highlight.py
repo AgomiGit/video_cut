@@ -2411,10 +2411,11 @@ def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] 
         "reviewer": "codex_cli",
         "instructions": {
             "green": "Render directly from edit_plan.json.",
-            "yellow": "Review current plan. Allowed operations: approve, reorder selected segments, replace with near miss, remove weak segment.",
-            "red": "Rerank bounded candidates and rebuild edit_plan.json only from existing candidate IDs and valid source ranges.",
-            "before_editing": "Copy edit_plan.json to edit_plan.before_codex_review.json.",
+            "yellow": "Review current plan. Allowed decisions: approve, reorder selected segments, replace with near miss, remove weak segment.",
+            "red": "Rerank bounded candidates by writing selected_segment_ids from existing candidate IDs only.",
             "audit": "Write codex_review_result.json with the decision and reasons.",
+            "apply": "Run python3 auto_highlight.py apply-review <work-dir>; it validates the result, backs up edit_plan.json, and writes the reviewed plan.",
+            "do_not": "Do not edit edit_plan.json directly before apply-review.",
         },
         "confidence": confidence,
         "project_focus": project_focus,
@@ -2432,6 +2433,78 @@ def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] 
     }
     write_json(out_dir / "gpt_review_packet.json", packet)
     return packet
+
+
+def format_review_rule(rule: dict[str, Any]) -> str:
+    detail = rule.get("detail", rule.get("value", ""))
+    suffix = f": {detail}" if detail != "" else ""
+    return f"- {rule.get('rule', 'unknown_rule')}{suffix}"
+
+
+def review_summary_segment_line(item: dict[str, Any], index: Optional[int] = None) -> str:
+    candidate = item.get("candidate", item)
+    segment_id = candidate.get("segment_id") or item.get("segment_id", "")
+    prefix = f"{index}. " if index is not None else "- "
+    title = candidate.get("title") or segment_id
+    score = candidate.get("final_score", "-")
+    time_text = candidate.get("time", "")
+    role = item.get("role", "")
+    role_text = f" {role}" if role else ""
+    line = f"{prefix}{segment_id}{role_text} {time_text} score={score} {title}".rstrip()
+    skip_reason = candidate.get("skip_reason") or item.get("skip_reason", "")
+    if skip_reason:
+        line += f" (skip: {skip_reason})"
+    return line
+
+
+def render_review_summary(out_dir: Path, confidence: dict[str, Any], packet: dict[str, Any], near_miss_limit: int = 5) -> str:
+    selected = packet.get("selected_segments", [])
+    near_misses = packet.get("near_miss_segments", [])[: max(0, near_miss_limit)]
+    report = packet.get("review_report", {})
+    status = confidence.get("status", "")
+    lines = [
+        "Review Summary",
+        f"Status: {status} (confidence={confidence.get('confidence_score')}, action={confidence.get('recommended_action')})",
+        f"Target: {packet.get('target_duration_sec')}s; selected: {packet.get('selected_duration_sec')}s; clips: {len(selected)}",
+        f"Packet: {out_dir / 'gpt_review_packet.json'}",
+        f"Report: {out_dir / str(report.get('path') or 'review_report.md')}",
+    ]
+    contact_sheet = report.get("contact_sheet")
+    if contact_sheet:
+        lines.append(f"Contact sheet: {out_dir / str(contact_sheet)}")
+
+    rules = confidence.get("triggered_rules", [])
+    lines.append("")
+    lines.append("Triggered Rules")
+    lines.extend([format_review_rule(rule) for rule in rules] or ["- none"])
+
+    lines.append("")
+    lines.append("Selected Segments")
+    if selected:
+        lines.extend(review_summary_segment_line(item, index + 1) for index, item in enumerate(selected))
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("Near Misses")
+    if near_misses:
+        lines.extend(review_summary_segment_line(item) for item in near_misses)
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("Next Step")
+    if status == "green":
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    elif status == "yellow":
+        lines.append(f"- Write {out_dir / 'codex_review_result.json'} with approve/revise.")
+        lines.append(f"- python3 auto_highlight.py apply-review {out_dir}")
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    else:
+        lines.append(f"- Write {out_dir / 'codex_review_result.json'} with rerank selected_segment_ids.")
+        lines.append(f"- python3 auto_highlight.py apply-review {out_dir}")
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    return "\n".join(lines)
 
 
 def source_duration_for_plan(out_dir: Path, plan: dict[str, Any]) -> float:
@@ -2951,6 +3024,13 @@ def command_review_gate(args: argparse.Namespace) -> dict[str, Any]:
     return confidence
 
 
+def command_review_summary(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    confidence = compute_plan_confidence(out_dir)
+    packet = build_gpt_review_packet(out_dir, confidence, args.top_candidates)
+    log(render_review_summary(out_dir, confidence, packet, args.near_misses))
+
+
 def command_apply_review(args: argparse.Namespace) -> None:
     review_result_path = Path(args.review_result) if args.review_result else None
     applied = apply_codex_review(Path(args.work_dir), review_result_path)
@@ -3016,8 +3096,8 @@ def command_run(args: argparse.Namespace) -> None:
             raise SystemExit(
                 "Review gate requires Codex CLI editorial handoff before render. "
                 f"Status={confidence['status']}; action={confidence['recommended_action']}. "
-                f"Read {Path(args.out) / 'gpt_review_packet.json'}, update edit_plan.json if needed, "
-                "write codex_review_result.json, then run render."
+                f"Read {Path(args.out) / 'gpt_review_packet.json'}, write codex_review_result.json, "
+                f"run python3 auto_highlight.py apply-review {args.out}, then run render."
             )
     command_render(
         argparse.Namespace(
@@ -3071,6 +3151,12 @@ def build_parser() -> argparse.ArgumentParser:
     review_gate.add_argument("work_dir", help="Work directory")
     review_gate.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
     review_gate.set_defaults(func=command_review_gate)
+
+    review_summary = subparsers.add_parser("review-summary", help="Print a human-readable Scheme C review summary")
+    review_summary.add_argument("work_dir", help="Work directory")
+    review_summary.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
+    review_summary.add_argument("--near-misses", type=int, default=5, help="Number of near-miss candidates to print")
+    review_summary.set_defaults(func=command_review_summary)
 
     apply_review = subparsers.add_parser("apply-review", help="Validate and apply codex_review_result.json to edit_plan.json")
     apply_review.add_argument("work_dir", help="Work directory")

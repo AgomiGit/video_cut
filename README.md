@@ -163,6 +163,7 @@ uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
 uv run python auto_highlight.py review-gate work/video1
+uv run python auto_highlight.py review-summary work/video1
 uv run python auto_highlight.py render work/video1
 ```
 
@@ -175,7 +176,8 @@ uv run python auto_highlight.py render work/video1
 | 3 | `score` | 幫候選片段打分數 |
 | 4 | `plan` | 決定最後要剪哪些片段 |
 | 5 | `review-gate` | 檢查剪輯計畫可信度，必要時交給 Codex CLI 審稿 |
-| 6 | `render` | 真的輸出精華影片 |
+| 6 | `review-summary` | 用人看得懂的方式列出信心檢查、已選片段和 near misses |
+| 7 | `render` | 真的輸出精華影片 |
 
 ## 輸出資料夾長什麼樣？
 
@@ -228,6 +230,12 @@ red: Codex CLI 接手重排，從候選片段中救回可用剪輯
 
 ```bash
 uv run python auto_highlight.py review-gate work/video1
+```
+
+如果想先快速看目前計畫、觸發規則、near misses 和下一步指令，可以跑：
+
+```bash
+uv run python auto_highlight.py review-summary work/video1
 ```
 
 也可以在完整流程中加上：

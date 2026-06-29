@@ -1,3 +1,4 @@
+import argparse
 import tempfile
 import unittest
 from unittest import mock
@@ -7,6 +8,34 @@ import auto_highlight as ah
 
 
 class AutoHighlightTests(unittest.TestCase):
+    def run_args(self, **overrides):
+        args = {
+            "input": "input.mp4",
+            "out": "work/video1",
+            "whisper_model": "small",
+            "force": False,
+            "visuals": False,
+            "thumbnail_count": 3,
+            "ocr_languages": "chi_tra+eng",
+            "vision_model": "",
+            "ollama_url": "http://127.0.0.1:11434",
+            "output_size": "1080x1920",
+            "planner": "heuristic",
+            "model": ah.DEFAULT_TEXT_MODEL,
+            "target_duration": 60,
+            "retention_ratio": ah.DEFAULT_TARGET_RETENTION_RATIO,
+            "clip_padding": ah.DEFAULT_CLIP_PADDING,
+            "review_mode": "off",
+            "review_top_candidates": 20,
+            "crf": ah.DEFAULT_RENDER_CRF,
+            "preset": ah.DEFAULT_RENDER_PRESET,
+            "audio_bitrate": ah.DEFAULT_AUDIO_BITRATE,
+            "video_bitrate": "",
+            "fade_duration": ah.DEFAULT_FADE_DURATION,
+        }
+        args.update(overrides)
+        return argparse.Namespace(**args)
+
     def test_format_time_rounds_to_hh_mm_ss(self):
         self.assertEqual(ah.format_time(829.4), "00:13:49")
         self.assertEqual(ah.format_time(3661.2), "01:01:01")
@@ -876,6 +905,89 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(packet["confidence"]["status"], "yellow")
         self.assertEqual(len(packet["top_candidates"]), 2)
         self.assertEqual(packet["selected_segments"][0]["candidate"]["segment_id"], "seg_001")
+        self.assertIn("apply-review", packet["instructions"]["apply"])
+        self.assertIn("Do not edit edit_plan.json directly", packet["instructions"]["do_not"])
+
+    def test_render_review_summary_prints_yellow_handoff_steps(self):
+        out_dir = Path("/tmp/work/video1")
+        confidence = {
+            "status": "yellow",
+            "confidence_score": 0.64,
+            "recommended_action": "codex_review",
+            "triggered_rules": [{"rule": "selected_segments_under_3", "value": 2}],
+        }
+        packet = {
+            "target_duration_sec": 60,
+            "selected_duration_sec": 42,
+            "selected_segments": [
+                {
+                    "role": "hook",
+                    "candidate": {
+                        "segment_id": "seg_001",
+                        "time": "00:00:00-00:00:21",
+                        "final_score": 8.0,
+                        "title": "開場",
+                    },
+                }
+            ],
+            "near_miss_segments": [
+                {
+                    "segment_id": "seg_003",
+                    "time": "00:01:20-00:01:41",
+                    "final_score": 7.85,
+                    "title": "備選",
+                    "skip_reason": "duration budget",
+                }
+            ],
+            "review_report": {"path": "review_report.md", "contact_sheet": "review_contact_sheet.jpg"},
+        }
+
+        summary = ah.render_review_summary(out_dir, confidence, packet)
+
+        self.assertIn("Status: yellow", summary)
+        self.assertIn("selected_segments_under_3: 2", summary)
+        self.assertIn("1. seg_001 hook 00:00:00-00:00:21 score=8.0 開場", summary)
+        self.assertIn("- seg_003 00:01:20-00:01:41 score=7.85 備選 (skip: duration budget)", summary)
+        self.assertIn("codex_review_result.json", summary)
+        self.assertIn("python3 auto_highlight.py apply-review /tmp/work/video1", summary)
+
+    def test_command_review_summary_writes_packet_and_logs_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+            args = argparse.Namespace(work_dir=str(tmp_path), top_candidates=2, near_misses=1)
+
+            with mock.patch.object(ah, "log") as log:
+                ah.command_review_summary(args)
+
+            summary = log.call_args.args[0]
+
+            self.assertTrue((tmp_path / "plan_confidence.json").exists())
+            self.assertTrue((tmp_path / "gpt_review_packet.json").exists())
+            self.assertIn("Review Summary", summary)
+            self.assertIn("Status: yellow", summary)
+            self.assertIn("python3 auto_highlight.py apply-review", summary)
 
     def test_apply_codex_review_approve_keeps_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -991,6 +1103,91 @@ class AutoHighlightTests(unittest.TestCase):
 
             with self.assertRaises(SystemExit):
                 ah.apply_codex_review(tmp_path)
+
+    def test_command_run_review_auto_green_continues_to_render(self):
+        args = self.run_args(review_mode="auto")
+        confidence = {"status": "green", "confidence_score": 0.9, "recommended_action": "render"}
+
+        with (
+            mock.patch.object(ah, "command_prepare") as prepare,
+            mock.patch.object(ah, "command_score") as score,
+            mock.patch.object(ah, "command_plan") as plan,
+            mock.patch.object(ah, "command_review_gate", return_value=confidence) as review_gate,
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            ah.command_run(args)
+
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(score.call_count, 1)
+        self.assertEqual(plan.call_count, 1)
+        self.assertEqual(review_gate.call_count, 1)
+        self.assertEqual(render.call_count, 1)
+
+    def test_command_run_review_auto_yellow_stops_before_render_and_mentions_apply_review(self):
+        args = self.run_args(review_mode="auto", out="work/yellow")
+        confidence = {"status": "yellow", "confidence_score": 0.64, "recommended_action": "codex_review"}
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate", return_value=confidence),
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                ah.command_run(args)
+
+        message = str(raised.exception)
+        self.assertIn("gpt_review_packet.json", message)
+        self.assertIn("codex_review_result.json", message)
+        self.assertIn("apply-review work/yellow", message)
+        self.assertNotIn("update edit_plan.json", message)
+        self.assertEqual(render.call_count, 0)
+
+    def test_command_run_review_always_stops_before_render_even_when_green(self):
+        args = self.run_args(review_mode="always")
+        confidence = {"status": "green", "confidence_score": 0.91, "recommended_action": "render"}
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate", return_value=confidence),
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                ah.command_run(args)
+
+        self.assertIn("apply-review work/video1", str(raised.exception))
+        self.assertEqual(render.call_count, 0)
+
+    def test_command_run_review_off_skips_gate_and_renders(self):
+        args = self.run_args(review_mode="off")
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate") as review_gate,
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            ah.command_run(args)
+
+        self.assertEqual(review_gate.call_count, 0)
+        self.assertEqual(render.call_count, 1)
+
+    def test_command_apply_review_passes_custom_review_result_path(self):
+        args = argparse.Namespace(work_dir="/tmp/work", review_result="/tmp/custom_review.json")
+        applied = {"decision": "revise", "changed": True}
+
+        with (
+            mock.patch.object(ah, "apply_codex_review", return_value=applied) as apply_review,
+            mock.patch.object(ah, "log"),
+        ):
+            ah.command_apply_review(args)
+
+        self.assertEqual(apply_review.call_args.args[0], Path("/tmp/work"))
+        self.assertEqual(apply_review.call_args.args[1], Path("/tmp/custom_review.json"))
 
     def test_contact_sheet_inputs_uses_middle_thumbnail_for_selected_and_near_miss(self):
         with tempfile.TemporaryDirectory() as directory:
