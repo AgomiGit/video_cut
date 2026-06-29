@@ -160,8 +160,9 @@ uv run python auto_highlight.py run input.mp4 \
 ```bash
 uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
-uv run python auto_highlight.py score work/video1 --planner heuristic
+uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
+uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py render work/video1
 ```
 
@@ -173,7 +174,8 @@ uv run python auto_highlight.py render work/video1
 | 2 | `analyze-visuals` | 抽縮圖，讓模型描述畫面 |
 | 3 | `score` | 幫候選片段打分數 |
 | 4 | `plan` | 決定最後要剪哪些片段 |
-| 5 | `render` | 真的輸出精華影片 |
+| 5 | `review-gate` | 檢查剪輯計畫可信度，必要時交給 Codex CLI 審稿 |
+| 6 | `render` | 真的輸出精華影片 |
 
 ## 輸出資料夾長什麼樣？
 
@@ -189,6 +191,8 @@ work/video1/
   scored_segments.json
   project.summary.json
   edit_plan.json
+  plan_confidence.json
+  gpt_review_packet.json
   review_report.md
   clips/
   thumbnails/
@@ -204,7 +208,47 @@ work/video1/
 | `candidates.json` | 候選片段 | 可能值得剪出來的片段 |
 | `scored_segments.json` | 分數 | 每段為什麼分數高或低 |
 | `edit_plan.json` | 剪輯計畫 | 最後要剪哪幾段 |
+| `plan_confidence.json` | 信心檢查 | 判斷目前計畫是 green、yellow 還是 red |
+| `gpt_review_packet.json` | 審稿資料包 | 給 Codex CLI 接手 yellow/red 時看的摘要資料 |
 | `output/highlight.mp4` | 成品 | 最後的精華影片 |
+
+## Codex CLI 審稿模式
+
+這個專案的日常使用方式是：你打開 Codex CLI，叫它幫你剪影片。你不需要另外填寫 LLM provider API key。
+
+目前已加入第一版 Scheme C confidence gate：
+
+```text
+green: 本地剪輯計畫可信，直接 render
+yellow: Codex CLI 接手審稿，只做小修改
+red: Codex CLI 接手重排，從候選片段中救回可用剪輯
+```
+
+你可以單獨跑：
+
+```bash
+uv run python auto_highlight.py review-gate work/video1
+```
+
+也可以在完整流程中加上：
+
+```bash
+uv run python auto_highlight.py run input.mp4 \
+  --out work/video1 \
+  --visuals \
+  --vision-model qwen2.5vl:7b \
+  --planner ollama \
+  --model qwen3:1.7b \
+  --review-mode auto
+```
+
+如果結果是 green，流程會繼續 render。如果結果是 yellow 或 red，程式會先停在 render 前，留下 `plan_confidence.json` 和 `gpt_review_packet.json`，讓 Codex CLI agent 讀 `edit_plan.json`、`scored_segments.json`、`review_report.json`、縮圖與 near misses 後接手判斷，不會停下來要求你提供 API key。
+
+相關長期實作計畫在：
+
+```text
+gpt_review_scheme_c_plan.md
+```
 
 ## 演算法怎麼想？
 

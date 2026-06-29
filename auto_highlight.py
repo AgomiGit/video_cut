@@ -135,6 +135,11 @@ GENERATED_ARTIFACT_FILES = [
     "project_focus.json",
     "project.summary.json",
     "edit_plan.json",
+    "plan_confidence.json",
+    "gpt_review_packet.json",
+    "codex_review_result.json",
+    "edit_plan.before_codex_review.json",
+    "edit_plan.gpt_reviewed.json",
     "review_report.json",
     "review_report.md",
     "ffmpeg_concat.txt",
@@ -2178,6 +2183,257 @@ def build_review_report(out_dir: Path) -> dict[str, Any]:
     }
 
 
+def ensure_review_report(out_dir: Path) -> dict[str, Any]:
+    report_path = out_dir / "review_report.json"
+    dependencies = [out_dir / "edit_plan.json", out_dir / "scored_segments.json"]
+    if report_path.exists() and all(report_path.stat().st_mtime >= path.stat().st_mtime for path in dependencies if path.exists()):
+        return read_json(report_path)
+    return write_review_report(out_dir)
+
+
+def scoring_fallback_ratio(scored: list[dict[str, Any]]) -> float:
+    if not scored:
+        return 1.0
+    sources = [str(item.get("scoring_source", "")) for item in scored]
+    if "ollama" not in sources:
+        return 0.0
+    fallback_count = sum(1 for source in sources if source != "ollama")
+    return fallback_count / len(scored)
+
+
+def selected_scored_items(plan: dict[str, Any], scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_by_id = {item.get("id"): item for item in scored}
+    return [scored_by_id[segment.get("segment_id")] for segment in plan.get("selected_segments", []) if segment.get("segment_id") in scored_by_id]
+
+
+def top_score_spread(scored: list[dict[str, Any]], limit: int = 10) -> float:
+    top_scores = [float(item.get("final_score", 0.0)) for item in sorted(scored, key=lambda item: item.get("final_score", 0.0), reverse=True)[:limit]]
+    if len(top_scores) < 2:
+        return 0.0
+    return max(top_scores) - min(top_scores)
+
+
+def selected_near_miss_gap(report: dict[str, Any]) -> Optional[float]:
+    selected_scores = [float(item.get("final_score", 0.0)) for item in report.get("selected_segments", [])]
+    near_miss_scores = [float(item.get("final_score", 0.0)) for item in report.get("near_miss_segments", [])]
+    if not selected_scores or not near_miss_scores:
+        return None
+    return max(selected_scores) - max(near_miss_scores)
+
+
+def selected_visual_repetition(selected: list[dict[str, Any]]) -> float:
+    if len(selected) < 2:
+        return 0.0
+    similarities = []
+    for left_index, left in enumerate(selected):
+        for right in selected[left_index + 1 :]:
+            similarities.append(scene_similarity(left, right))
+    return max(similarities) if similarities else 0.0
+
+
+def role_confidence(plan: dict[str, Any], scored: list[dict[str, Any]], role: str) -> float:
+    scored_by_id = {item.get("id"): item for item in scored}
+    planned = next((segment for segment in plan.get("selected_segments", []) if segment.get("role") == role), None)
+    if not planned:
+        return 0.0
+    scored_item = scored_by_id.get(planned.get("segment_id"), {})
+    scores = scored_item.get("scores", {}) if isinstance(scored_item.get("scores"), dict) else {}
+    role_score = number_value(scores.get("hook" if role == "hook" else "clarity"), 0.0)
+    final_score = number_value(scored_item.get("final_score", planned.get("final_score", 0.0)), 0.0)
+    return max(role_score, final_score)
+
+
+def all_selected_clarity_below(selected: list[dict[str, Any]], threshold: float) -> bool:
+    if not selected:
+        return False
+    clarity_scores = [number_value(item.get("scores", {}).get("clarity"), 0.0) for item in selected]
+    return all(score < threshold for score in clarity_scores)
+
+
+def validate_edit_plan(plan: dict[str, Any]) -> list[str]:
+    errors = []
+    source_duration = None
+    selected = plan.get("selected_segments", [])
+    if not isinstance(selected, list):
+        return ["selected_segments_not_list"]
+    for segment in selected:
+        try:
+            start = float(segment.get("source_start"))
+            end = float(segment.get("source_end"))
+        except (TypeError, ValueError):
+            errors.append(f"invalid_bounds:{segment.get('segment_id', '')}")
+            continue
+        if start < 0 or end <= start:
+            errors.append(f"invalid_bounds:{segment.get('segment_id', '')}")
+        if source_duration is not None and end > source_duration:
+            errors.append(f"outside_source:{segment.get('segment_id', '')}")
+    for index, left in enumerate(selected):
+        for right in selected[index + 1 :]:
+            if max(0.0, min(float(left.get("source_end", 0.0)), float(right.get("source_end", 0.0))) - max(float(left.get("source_start", 0.0)), float(right.get("source_start", 0.0)))) > 0.5:
+                errors.append(f"overlapping_plan_segments:{left.get('segment_id', '')}:{right.get('segment_id', '')}")
+    return errors
+
+
+def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
+    plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    report = ensure_review_report(out_dir)
+    selected = selected_scored_items(plan, scored)
+    selected_count = len(plan.get("selected_segments", []))
+    target_duration = max(1.0, float(plan.get("target_duration_sec", 0.0) or 0.0))
+    selected_duration = float(plan.get("selected_duration_sec", 0.0) or 0.0)
+    duration_ratio = selected_duration / target_duration
+    fallback_ratio = scoring_fallback_ratio(scored)
+    score_spread = top_score_spread(scored)
+    near_miss_gap = selected_near_miss_gap(report)
+    repetition = selected_visual_repetition(selected)
+    hook_score = role_confidence(plan, scored, "hook")
+    ending_score = role_confidence(plan, scored, "ending")
+    plan_errors = validate_edit_plan(plan)
+
+    red_rules = []
+    if selected_count == 0:
+        red_rules.append({"rule": "selected_segments_zero", "detail": "No selected segments are available to render."})
+    if duration_ratio < 0.45:
+        red_rules.append({"rule": "selected_duration_under_45_percent", "value": round(duration_ratio, 3)})
+    if fallback_ratio > 0.35:
+        red_rules.append({"rule": "fallback_scoring_ratio_over_35_percent", "value": round(fallback_ratio, 3)})
+    if all_selected_clarity_below(selected, 6.0):
+        red_rules.append({"rule": "all_selected_clarity_under_6"})
+    for error_name in plan_errors:
+        red_rules.append({"rule": "invalid_edit_plan", "detail": error_name})
+
+    yellow_rules = []
+    if selected_count < 3:
+        yellow_rules.append({"rule": "selected_segments_under_3", "value": selected_count})
+    if duration_ratio < 0.70:
+        yellow_rules.append({"rule": "selected_duration_under_70_percent", "value": round(duration_ratio, 3)})
+    if near_miss_gap is not None and near_miss_gap < 0.3:
+        yellow_rules.append({"rule": "near_miss_score_close_to_selected", "value": round(near_miss_gap, 3)})
+    if len(scored) >= 3 and score_spread < 0.6:
+        yellow_rules.append({"rule": "top_10_score_spread_under_0_6", "value": round(score_spread, 3)})
+    if fallback_ratio > 0.15:
+        yellow_rules.append({"rule": "fallback_scoring_ratio_over_15_percent", "value": round(fallback_ratio, 3)})
+    if repetition >= 0.82:
+        yellow_rules.append({"rule": "selected_visual_repetition_high", "value": round(repetition, 3)})
+    if hook_score < 6.5:
+        yellow_rules.append({"rule": "hook_confidence_weak", "value": round(hook_score, 3)})
+    if selected_count >= 2 and ending_score < 6.5:
+        yellow_rules.append({"rule": "ending_confidence_weak", "value": round(ending_score, 3)})
+
+    if red_rules:
+        status = "red"
+        recommended_action = "codex_rerank"
+    elif len(yellow_rules) >= 2:
+        status = "yellow"
+        recommended_action = "codex_review"
+    else:
+        status = "green"
+        recommended_action = "render"
+
+    confidence_score = max(0.0, min(1.0, 1.0 - len(red_rules) * 0.35 - len(yellow_rules) * 0.12))
+    result = {
+        "version": "plan_confidence_v1",
+        "status": status,
+        "confidence_score": round(confidence_score, 3),
+        "recommended_action": recommended_action,
+        "triggered_rules": red_rules + yellow_rules,
+        "red_rules": red_rules,
+        "yellow_rules": yellow_rules,
+        "metrics": {
+            "selected_count": selected_count,
+            "target_duration_sec": round(target_duration, 3),
+            "selected_duration_sec": round(selected_duration, 3),
+            "duration_ratio": round(duration_ratio, 3),
+            "fallback_scoring_ratio": round(fallback_ratio, 3),
+            "top_10_score_spread": round(score_spread, 3),
+            "selected_near_miss_score_gap": None if near_miss_gap is None else round(near_miss_gap, 3),
+            "selected_visual_repetition": round(repetition, 3),
+            "hook_confidence": round(hook_score, 3),
+            "ending_confidence": round(ending_score, 3),
+        },
+    }
+    write_json(out_dir / "plan_confidence.json", result)
+    return result
+
+
+def candidate_review_entry(candidate: dict[str, Any], skip_reason: str = "") -> dict[str, Any]:
+    signals = candidate.get("signals", {})
+    vision_summary = signals.get("vision", {}).get("summary", {}) if isinstance(signals.get("vision"), dict) else {}
+    return {
+        "segment_id": candidate.get("id", ""),
+        "time": f"{format_time(float(candidate.get('start', 0.0)))}-{format_time(float(candidate.get('end', 0.0)))}",
+        "start": candidate.get("start"),
+        "end": candidate.get("end"),
+        "duration_sec": candidate.get("duration_sec"),
+        "title": candidate.get("title", candidate.get("id", "")),
+        "summary": candidate.get("summary", ""),
+        "final_score": candidate.get("final_score"),
+        "scores": candidate.get("scores", {}),
+        "tags": candidate.get("tags", []),
+        "is_standalone": candidate.get("is_standalone", True),
+        "avoid_reason": candidate.get("avoid_reason", "none"),
+        "scoring_source": candidate.get("scoring_source", ""),
+        "skip_reason": skip_reason,
+        "transcript_excerpt": summarize_transcript(candidate.get("transcript", ""), max_chars=140),
+        "visual_description": summarize_transcript(vision_summary.get("description", ""), max_chars=160),
+        "visual_subjects": vision_summary.get("stable_subjects") or vision_summary.get("normalized_subjects") or vision_summary.get("subjects", []),
+        "thumbnails": signals.get("thumbnails", []),
+        "focus": signals.get("focus", {}),
+    }
+
+
+def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] = None, top_candidate_limit: int = 20) -> dict[str, Any]:
+    plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    report = ensure_review_report(out_dir)
+    confidence = confidence or compute_plan_confidence(out_dir)
+    focus_path = out_dir / "project_focus.json"
+    project_focus = read_json(focus_path) if focus_path.exists() else {}
+    selected_ids = {segment.get("segment_id") for segment in plan.get("selected_segments", [])}
+    scored_by_id = {item.get("id"): item for item in scored}
+    selected = [
+        {
+            **segment,
+            "candidate": candidate_review_entry(scored_by_id.get(segment.get("segment_id"), {})),
+        }
+        for segment in plan.get("selected_segments", [])
+    ]
+    params = selection_parameters(scored, float(plan.get("target_duration_sec", 0.0) or 0.0))
+    selected_scored = [scored_by_id[segment_id] for segment_id in selected_ids if segment_id in scored_by_id]
+    near_misses = near_miss_segments(plan, scored, limit=10)
+    top_candidates = []
+    for candidate in sorted(scored, key=lambda item: item.get("final_score", 0.0), reverse=True)[:top_candidate_limit]:
+        skip_reason = "" if candidate.get("id") in selected_ids else skipped_reason(candidate, selected_scored, float(plan.get("target_duration_sec", 0.0) or 0.0), params)
+        top_candidates.append(candidate_review_entry(candidate, skip_reason))
+    packet = {
+        "version": "gpt_review_packet_v1",
+        "reviewer": "codex_cli",
+        "instructions": {
+            "green": "Render directly from edit_plan.json.",
+            "yellow": "Review current plan. Allowed operations: approve, reorder selected segments, replace with near miss, remove weak segment.",
+            "red": "Rerank bounded candidates and rebuild edit_plan.json only from existing candidate IDs and valid source ranges.",
+            "before_editing": "Copy edit_plan.json to edit_plan.before_codex_review.json.",
+            "audit": "Write codex_review_result.json with the decision and reasons.",
+        },
+        "confidence": confidence,
+        "project_focus": project_focus,
+        "target_duration_sec": plan.get("target_duration_sec"),
+        "selected_duration_sec": plan.get("selected_duration_sec"),
+        "current_plan": plan,
+        "selected_segments": selected,
+        "near_miss_segments": near_misses,
+        "top_candidates": top_candidates,
+        "review_report": {
+            "path": "review_report.md",
+            "contact_sheet": report.get("contact_sheet", "review_contact_sheet.jpg"),
+            "selected_count": report.get("selected_count", 0),
+        },
+    }
+    write_json(out_dir / "gpt_review_packet.json", packet)
+    return packet
+
+
 def render_review_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Highlight Review Report",
@@ -2458,6 +2714,23 @@ def command_plan(args: argparse.Namespace) -> None:
     log(f"Wrote edit plan with {len(plan['selected_segments'])} segments to {out_dir / 'edit_plan.json'}")
 
 
+def command_review_gate(args: argparse.Namespace) -> dict[str, Any]:
+    out_dir = Path(args.work_dir)
+    confidence = compute_plan_confidence(out_dir)
+    build_gpt_review_packet(out_dir, confidence, args.top_candidates)
+    log(
+        "Review gate: "
+        f"{confidence['status']} "
+        f"(confidence={confidence['confidence_score']}, action={confidence['recommended_action']})"
+    )
+    if confidence["triggered_rules"]:
+        for rule in confidence["triggered_rules"]:
+            detail = rule.get("detail", rule.get("value", ""))
+            log(f"- {rule.get('rule')}: {detail}")
+    log(f"Wrote {out_dir / 'plan_confidence.json'} and {out_dir / 'gpt_review_packet.json'}")
+    return confidence
+
+
 def command_report(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
     report = write_review_report(out_dir)
@@ -2505,6 +2778,17 @@ def command_run(args: argparse.Namespace) -> None:
         retention_ratio=args.retention_ratio,
     )
     command_plan(plan_args)
+    if args.review_mode != "off":
+        review_args = argparse.Namespace(work_dir=args.out, top_candidates=args.review_top_candidates)
+        confidence = command_review_gate(review_args)
+        should_handoff = args.review_mode == "always" or confidence["status"] in {"yellow", "red"}
+        if should_handoff:
+            raise SystemExit(
+                "Review gate requires Codex CLI editorial handoff before render. "
+                f"Status={confidence['status']}; action={confidence['recommended_action']}. "
+                f"Read {Path(args.out) / 'gpt_review_packet.json'}, update edit_plan.json if needed, "
+                "write codex_review_result.json, then run render."
+            )
     command_render(
         argparse.Namespace(
             work_dir=args.out,
@@ -2553,6 +2837,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     plan.set_defaults(func=command_plan)
 
+    review_gate = subparsers.add_parser("review-gate", help="Evaluate edit_plan confidence and prepare Codex CLI review packet")
+    review_gate.add_argument("work_dir", help="Work directory")
+    review_gate.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
+    review_gate.set_defaults(func=command_review_gate)
+
     report = subparsers.add_parser("report", help="Create review_report.md and review_report.json from the edit plan")
     report.add_argument("work_dir", help="Work directory")
     report.set_defaults(func=command_report)
@@ -2588,6 +2877,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     run.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
+    run.add_argument("--review-mode", choices=["off", "auto", "always"], default="off", help="Run Scheme C confidence gate before render")
+    run.add_argument("--review-top-candidates", type=int, default=20, help="Number of top scored candidates to include in the Codex review packet")
     run.set_defaults(func=command_run)
 
     return parser

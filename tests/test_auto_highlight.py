@@ -203,8 +203,8 @@ class AutoHighlightTests(unittest.TestCase):
             '"is_standalone":"false","avoid_reason":"too confusing"}'
         )
 
-        with mock.patch.object(ah, "run_capture", return_value=response):
-            scored = ah.score_with_ollama(candidate, "qwen2.5:3b")
+        with mock.patch.object(ah, "run_ollama_chat_text", return_value=response):
+            scored = ah.score_with_ollama(candidate, "qwen3:1.7b")
 
         self.assertFalse(scored["is_standalone"])
         self.assertEqual(scored["scores"]["hook"], 9.0)
@@ -754,6 +754,128 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("thumbnails/seg_001/thumb_00.jpg", markdown)
         self.assertIn("thumbnails/seg_002/thumb_00.jpg", markdown)
         self.assertIn("Near Misses", markdown)
+
+    def test_compute_plan_confidence_green_for_stable_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 60,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 20, "duration_sec": 20, "final_score": 9},
+                        {"segment_id": "seg_002", "role": "highlight", "source_start": 30, "source_end": 50, "duration_sec": 20, "final_score": 8},
+                        {"segment_id": "seg_003", "role": "ending", "source_start": 70, "source_end": 90, "duration_sec": 20, "final_score": 7},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "scores": {"hook": 9, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇 你看", "signals": {}},
+                    {"id": "seg_002", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 70, "end": 90, "duration_sec": 20, "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+                    {"id": "seg_004", "start": 110, "end": 130, "duration_sec": 20, "final_score": 5, "scores": {"hook": 5, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+            self.assertTrue((tmp_path / "plan_confidence.json").exists())
+
+        self.assertEqual(confidence["status"], "green")
+        self.assertEqual(confidence["recommended_action"], "render")
+
+    def test_compute_plan_confidence_red_for_empty_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 0,
+                    "selected_segments": [],
+                },
+            )
+            ah.write_json(tmp_path / "scored_segments.json", [])
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+        self.assertEqual(confidence["status"], "red")
+        self.assertEqual(confidence["recommended_action"], "codex_rerank")
+        self.assertIn("selected_segments_zero", [rule["rule"] for rule in confidence["red_rules"]])
+
+    def test_compute_plan_confidence_yellow_for_short_uncertain_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+        self.assertEqual(confidence["status"], "yellow")
+        self.assertEqual(confidence["recommended_action"], "codex_review")
+
+    def test_build_gpt_review_packet_includes_handoff_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+            packet = ah.build_gpt_review_packet(tmp_path, confidence, top_candidate_limit=2)
+            self.assertTrue((tmp_path / "gpt_review_packet.json").exists())
+
+        self.assertEqual(packet["reviewer"], "codex_cli")
+        self.assertEqual(packet["confidence"]["status"], "yellow")
+        self.assertEqual(len(packet["top_candidates"]), 2)
+        self.assertEqual(packet["selected_segments"][0]["candidate"]["segment_id"], "seg_001")
 
     def test_contact_sheet_inputs_uses_middle_thumbnail_for_selected_and_near_miss(self):
         with tempfile.TemporaryDirectory() as directory:

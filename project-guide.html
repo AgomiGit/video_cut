@@ -988,7 +988,7 @@
               <span class="step-number">3</span>
               <div>
                 <h3>想慢慢檢查，就分段執行</h3>
-                <p class="muted">如果影片很長，建議分成五步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
+                <p class="muted">如果影片很長，建議分成六步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1000,11 +1000,12 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --target-duration 180
+uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py render work/video1</code></pre>
             </div>
           </article>
@@ -1231,10 +1232,19 @@ ollama pull qwen2.5vl:7b</code></pre>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 6 9 17l-5-5"></path><path d="M14 6h6v6"></path><path d="M4 20h16"></path>
+                </svg>
+              </span>
+              <h3>7. 信心檢查</h3>
+              <p class="muted">用 green/yellow/red 判斷剪輯計畫是否穩；yellow 或 red 時由 Codex CLI 接手審稿，不需要另外填 API key。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M4 4h16v16H4z"></path><path d="M10 8l6 4-6 4z"></path>
                 </svg>
               </span>
-              <h3>7. 輸出影片</h3>
+              <h3>8. 輸出影片</h3>
               <p class="muted">ffmpeg 依照 edit_plan.json 切片、淡入淡出、合成 highlight.mp4。</p>
             </article>
           </div>
@@ -1252,6 +1262,10 @@ ollama pull qwen2.5vl:7b</code></pre>
           <article class="explain-card">
             <h3>分數怎麼想？</h3>
             <p class="muted">像老師改考卷一樣，不只看一題。它會看好笑、互動、地點、清楚度、可不可以單獨看懂。</p>
+          </article>
+          <article class="explain-card">
+            <h3>Codex 什麼時候接手？</h3>
+            <p class="muted">如果信心檢查是 green 就直接輸出；如果是 yellow 或 red，Codex CLI 會讀剪輯計畫、分數、review report 和縮圖，幫忙確認或重排片段。</p>
           </article>
         </div>
 
