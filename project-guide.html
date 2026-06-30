@@ -966,20 +966,20 @@
               <span class="step-number">2</span>
               <div>
                 <h3>一行指令跑內容優先流程</h3>
-                <p class="muted">旅遊、景點、展覽或戶外影片建議用 <code>content-first</code>。它會先看縮圖和畫面亮點，再決定要保留哪些片段，秒數只當安全護欄。</p>
+                <p class="muted">旅遊、景點、展覽或戶外影片建議用 <code>content-first</code>。它會先看縮圖和畫面亮點，再決定要保留哪些片段，並用 <code>quality-mode auto</code> 自動選 1080p、1440p 或 4K。</p>
               </div>
             </div>
             <div class="mini-art">
               <div class="terminal-art" aria-label="終端機指令示意">
-                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto<br>
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto<br>
                 → 讀影片<br>
                 → 找畫面亮點<br>
                 → 輸出 highlight.mp4
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto">複製</button>
-              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto</code></pre>
             </div>
           </article>
 
@@ -1000,14 +1000,14 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py render work/video1 --quality-mode auto">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
 uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py review-summary work/video1
-uv run python auto_highlight.py render work/video1</code></pre>
+uv run python auto_highlight.py render work/video1 --quality-mode auto</code></pre>
             </div>
           </article>
 
@@ -1036,7 +1036,7 @@ uv run python auto_highlight.py render work/video1</code></pre>
 
         <div class="callout">
           <strong>小提醒：</strong>
-          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。使用 <code>--review-mode auto</code> 時，yellow 或 red 會先停在 render 前，讓 Codex 審稿後再輸出。
+          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。使用 <code>--quality-mode auto</code> 時，低光室內粗顆粒會偏向 1080p，清楚戶外景點才會偏向 4K。
         </div>
       </section>
 

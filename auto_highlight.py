@@ -113,6 +113,11 @@ DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
 DEFAULT_TEXT_MODEL = "qwen3:1.7b"
+AUTO_RENDER_PROFILES = {
+    "1080p": {"output_size": "1920x1080", "video_bitrate": "6000k"},
+    "1440p": {"output_size": "2560x1440", "video_bitrate": "10000k"},
+    "4k": {"output_size": "3840x2160", "video_bitrate": "16565k"},
+}
 DEFAULT_TARGET_RETENTION_RATIO = 0.30
 MAX_SELECTED_SEGMENTS = 10
 TARGET_SEGMENT_SECONDS = 24.0
@@ -184,6 +189,7 @@ class RenderSettings:
     audio_bitrate: str
     video_bitrate: str = ""
     fade_duration: float = DEFAULT_FADE_DURATION
+    quality_mode: str = "manual"
 
 
 def log(message: str) -> None:
@@ -385,6 +391,107 @@ def render_encoding_args(settings: RenderSettings, clip_duration: float = 0.0) -
         args.extend(["-crf", str(settings.crf)])
     args.extend(["-c:a", "aac", "-b:a", settings.audio_bitrate, "-movflags", "+faststart"])
     return args
+
+
+def selected_render_candidates(plan: dict[str, Any], scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_by_id = {item.get("id"): item for item in scored}
+    return [scored_by_id[segment.get("segment_id")] for segment in plan.get("selected_segments", []) if segment.get("segment_id") in scored_by_id]
+
+
+def render_quality_text(candidate: dict[str, Any]) -> str:
+    signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+    summary = signals.get("vision", {}).get("summary", {}) if isinstance(signals.get("vision"), dict) else {}
+    return " ".join(
+        [
+            str(summary.get("description", "")),
+            str(summary.get("setting", "")),
+            " ".join(listify(summary.get("settings"))),
+            " ".join(listify(summary.get("visual_hooks"))),
+            " ".join(listify(summary.get("subjects"))),
+            " ".join(candidate.get("tags", []) if isinstance(candidate.get("tags"), list) else []),
+        ]
+    ).lower()
+
+
+def render_quality_metrics(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    qualities = []
+    outdoor_terms = ("outdoor", "outside", "street", "river", "lake", "mountain", "hill", "sky", "rural", "landscape", "forest", "market", "戶外", "街", "湖", "山", "河")
+    indoor_terms = ("indoor", "inside", "museum", "gallery", "hallway", "kitchen", "corridor", "tunnel", "room", "展廳", "室內", "博物館", "廚房", "走廊")
+    outdoor_count = 0
+    indoor_count = 0
+    for candidate in selected:
+        signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+        quality = signals.get("visual_quality", {}) if isinstance(signals.get("visual_quality"), dict) else {}
+        if quality:
+            qualities.append(quality)
+        text = render_quality_text(candidate)
+        if any(term in text for term in outdoor_terms):
+            outdoor_count += 1
+        if any(term in text for term in indoor_terms):
+            indoor_count += 1
+
+    count = len(selected)
+    quality_count = len(qualities)
+    avg_brightness = sum(number_value(item.get("brightness"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    avg_contrast = sum(number_value(item.get("contrast"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    avg_sharpness = sum(number_value(item.get("sharpness"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    weak_count = sum(
+        1
+        for item in qualities
+        if number_value(item.get("brightness"), 0.0) < 0.34 or number_value(item.get("sharpness"), 0.0) < 0.05
+    )
+    return {
+        "selected_count": count,
+        "quality_count": quality_count,
+        "avg_brightness": round(avg_brightness, 3),
+        "avg_contrast": round(avg_contrast, 3),
+        "avg_sharpness": round(avg_sharpness, 3),
+        "weak_quality_ratio": round(weak_count / quality_count, 3) if quality_count else 1.0,
+        "outdoor_ratio": round(outdoor_count / count, 3) if count else 0.0,
+        "indoor_ratio": round(indoor_count / count, 3) if count else 0.0,
+    }
+
+
+def choose_auto_render_profile(plan: dict[str, Any], scored: list[dict[str, Any]]) -> dict[str, Any]:
+    selected = selected_render_candidates(plan, scored)
+    metrics = render_quality_metrics(selected)
+    if metrics["quality_count"] == 0:
+        profile = "1080p"
+        reason = "no visual quality metadata is available"
+    elif metrics["weak_quality_ratio"] >= 0.55 or metrics["avg_sharpness"] < 0.05 or metrics["avg_brightness"] < 0.32:
+        profile = "1080p"
+        reason = "selected clips are mostly low-light, soft, or grainy"
+    elif metrics["outdoor_ratio"] >= 0.6 and metrics["weak_quality_ratio"] <= 0.25 and metrics["avg_brightness"] >= 0.42 and metrics["avg_sharpness"] >= 0.06:
+        profile = "4k"
+        reason = "selected clips are mostly bright outdoor detail shots"
+    else:
+        profile = "1440p"
+        reason = "selected clips are mixed quality"
+    return {"profile": profile, "reason": reason, "metrics": metrics, **AUTO_RENDER_PROFILES[profile]}
+
+
+def resolve_render_settings(out_dir: Path, plan: dict[str, Any], settings: RenderSettings) -> RenderSettings:
+    if settings.quality_mode != "auto":
+        return settings
+    scored_path = out_dir / "scored_segments.json"
+    scored = read_json(scored_path) if scored_path.exists() else []
+    profile = choose_auto_render_profile(plan, scored)
+    video_bitrate = settings.video_bitrate or str(profile["video_bitrate"])
+    resolved = RenderSettings(
+        output_size=str(profile["output_size"]),
+        crf=settings.crf,
+        preset=settings.preset,
+        audio_bitrate=settings.audio_bitrate,
+        video_bitrate=video_bitrate,
+        fade_duration=settings.fade_duration,
+        quality_mode=settings.quality_mode,
+    )
+    log(
+        "Auto render quality: "
+        f"{profile['profile']} ({profile['output_size']}, {video_bitrate}); "
+        f"{profile['reason']}; metrics={profile['metrics']}"
+    )
+    return resolved
 
 
 def init_work_dir(out_dir: Path, source_video: Path, force: bool = False) -> None:
@@ -2985,6 +3092,7 @@ def write_review_report(out_dir: Path) -> dict[str, Any]:
 def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
     require_tool("ffmpeg")
     plan = read_json(out_dir / "edit_plan.json")
+    settings = resolve_render_settings(out_dir, plan, settings)
     source_video = Path(plan["source_video"])
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -3124,6 +3232,7 @@ def command_render(args: argparse.Namespace) -> None:
         audio_bitrate=args.audio_bitrate,
         video_bitrate=args.video_bitrate,
         fade_duration=args.fade_duration,
+        quality_mode=args.quality_mode,
     )
     render_edit_plan(Path(args.work_dir), settings)
 
@@ -3178,6 +3287,7 @@ def command_run(args: argparse.Namespace) -> None:
             audio_bitrate=args.audio_bitrate,
             video_bitrate=args.video_bitrate,
             fade_duration=args.fade_duration,
+            quality_mode=args.quality_mode,
         )
     )
 
@@ -3246,6 +3356,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     render.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     render.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
+    render.add_argument("--quality-mode", choices=["manual", "auto"], default="manual", help="Use fixed render settings or infer 1080p/1440p/4K from selected clip quality")
     render.set_defaults(func=command_render)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
@@ -3268,6 +3379,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     run.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
+    run.add_argument("--quality-mode", choices=["manual", "auto"], default="manual", help="Use fixed render settings or infer 1080p/1440p/4K from selected clip quality")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     run.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
     run.add_argument("--review-mode", choices=["off", "auto", "always"], default="off", help="Run Scheme C confidence gate before render")

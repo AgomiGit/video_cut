@@ -33,6 +33,7 @@ class AutoHighlightTests(unittest.TestCase):
             "audio_bitrate": ah.DEFAULT_AUDIO_BITRATE,
             "video_bitrate": "",
             "fade_duration": ah.DEFAULT_FADE_DURATION,
+            "quality_mode": "manual",
         }
         args.update(overrides)
         return argparse.Namespace(**args)
@@ -576,6 +577,61 @@ class AutoHighlightTests(unittest.TestCase):
         selected = ah.select_segments_content_first(scored, target_duration=120)
 
         self.assertEqual([item["id"] for item in selected], ["view"])
+
+    def test_auto_render_profile_uses_1080p_for_low_quality_selected_clips(self):
+        plan = {"selected_segments": [{"segment_id": "indoor"}, {"segment_id": "soft"}]}
+        scored = [
+            {
+                "id": "indoor",
+                "signals": {
+                    "visual_quality": {"brightness": 0.28, "contrast": 0.2, "sharpness": 0.04},
+                    "vision": {"summary": {"description": "An indoor museum hallway with dim light."}},
+                },
+            },
+            {
+                "id": "soft",
+                "signals": {
+                    "visual_quality": {"brightness": 0.36, "contrast": 0.18, "sharpness": 0.035},
+                    "vision": {"summary": {"description": "A soft tunnel scene inside a building."}},
+                },
+            },
+        ]
+
+        profile = ah.choose_auto_render_profile(plan, scored)
+
+        self.assertEqual(profile["profile"], "1080p")
+        self.assertEqual(profile["output_size"], "1920x1080")
+
+    def test_auto_render_profile_uses_4k_for_bright_outdoor_selected_clips(self):
+        plan = {"selected_segments": [{"segment_id": "lake"}, {"segment_id": "market"}, {"segment_id": "mountain"}]}
+        scored = [
+            {
+                "id": "lake",
+                "signals": {
+                    "visual_quality": {"brightness": 0.52, "contrast": 0.24, "sharpness": 0.08},
+                    "vision": {"summary": {"description": "A bright outdoor lake landscape with forest and sky."}},
+                },
+            },
+            {
+                "id": "market",
+                "signals": {
+                    "visual_quality": {"brightness": 0.47, "contrast": 0.26, "sharpness": 0.075},
+                    "vision": {"summary": {"description": "An outdoor market by a river under clear sky."}},
+                },
+            },
+            {
+                "id": "mountain",
+                "signals": {
+                    "visual_quality": {"brightness": 0.5, "contrast": 0.22, "sharpness": 0.07},
+                    "vision": {"summary": {"description": "A mountain landscape and rural hill outside."}},
+                },
+            },
+        ]
+
+        profile = ah.choose_auto_render_profile(plan, scored)
+
+        self.assertEqual(profile["profile"], "4k")
+        self.assertEqual(profile["output_size"], "3840x2160")
 
     def test_split_long_candidate_marks_event_windows(self):
         candidate = ah.Candidate("seg_000", 0, 70, " ".join(["普通對話"] * 4), {})

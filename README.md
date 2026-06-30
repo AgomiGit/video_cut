@@ -137,10 +137,13 @@ uv run python auto_highlight.py run input.mp4 \
   --visuals \
   --vision-model qwen2.5vl:7b \
   --selection-mode content-first \
+  --quality-mode auto \
   --review-mode auto
 ```
 
 這個模式尤其依賴 `--visuals`，因為它會抽縮圖、讓本機視覺模型描述畫面，再把湖景、老街、展覽、動物、山景、特殊建築等視覺亮點納入選片。沒有設定 `--target-duration` 時，工具仍會用預設 retention ratio 算出一個長度護欄，但不會為了湊秒數硬塞弱片段。
+
+`--quality-mode auto` 會看最後入選片段的亮度、銳利度和室內外比例，自動在 1080p、1440p、4K 之間選輸出規格。多數片段是低光室內或粗顆粒時會偏向 1080p；多數是清楚戶外景點時才會輸出 4K。
 
 ## 加上縮圖分析
 
@@ -181,7 +184,7 @@ uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3
 uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py review-summary work/video1
-uv run python auto_highlight.py render work/video1
+uv run python auto_highlight.py render work/video1 --quality-mode auto
 ```
 
 每一步在做什麼：
@@ -194,7 +197,7 @@ uv run python auto_highlight.py render work/video1
 | 4 | `plan` | 決定最後要剪哪些片段；可用 `--selection-mode content-first` 先看內容亮點 |
 | 5 | `review-gate` | 檢查剪輯計畫可信度，必要時交給 Codex CLI 審稿 |
 | 6 | `review-summary` | 用人看得懂的方式列出信心檢查、已選片段和 near misses |
-| 7 | `render` | 真的輸出精華影片 |
+| 7 | `render` | 真的輸出精華影片；可用 `--quality-mode auto` 自動選 1080p、1440p 或 4K |
 
 ## 輸出資料夾長什麼樣？
 
@@ -263,6 +266,7 @@ uv run python auto_highlight.py run input.mp4 \
   --visuals \
   --vision-model qwen2.5vl:7b \
   --selection-mode content-first \
+  --quality-mode auto \
   --planner ollama \
   --model qwen3:1.7b \
   --review-mode auto
@@ -274,7 +278,7 @@ Codex CLI 接手後，會寫一份 `codex_review_result.json`。接著用程式�
 
 ```bash
 uv run python auto_highlight.py apply-review work/video1
-uv run python auto_highlight.py render work/video1
+uv run python auto_highlight.py render work/video1 --quality-mode auto
 ```
 
 `apply-review` 會檢查 segment id、重疊、時長和來源範圍。通過後會備份原本的 `edit_plan.json` 成 `edit_plan.before_codex_review.json`，再更新新的 `edit_plan.json`。
