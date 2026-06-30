@@ -25,6 +25,7 @@ class AutoHighlightTests(unittest.TestCase):
             "target_duration": 60,
             "retention_ratio": ah.DEFAULT_TARGET_RETENTION_RATIO,
             "clip_padding": ah.DEFAULT_CLIP_PADDING,
+            "selection_mode": "duration",
             "review_mode": "off",
             "review_top_candidates": 20,
             "crf": ah.DEFAULT_RENDER_CRF,
@@ -544,6 +545,37 @@ class AutoHighlightTests(unittest.TestCase):
         selected = ah.select_segments(scored, target_duration=45)
 
         self.assertEqual([item["id"] for item in selected], ["a", "c"])
+
+    def test_content_first_selection_prioritizes_visual_highlights(self):
+        def candidate(candidate_id, start, final_score, visual_event, place, quality):
+            return {
+                "id": candidate_id,
+                "start": start,
+                "end": start + 20,
+                "duration_sec": 20,
+                "final_score": final_score,
+                "is_standalone": True,
+                "avoid_reason": "none",
+                "heuristic_scores": {
+                    "visual_event_score": visual_event,
+                    "visual_interest_score": visual_event,
+                    "place_score": place,
+                    "focus_score": place,
+                    "emotion_score": 0,
+                    "keyword_score": 0,
+                },
+                "signals": {"visual_quality": quality},
+            }
+
+        scored = [
+            candidate("talk", 0, 7.0, 0.0, 0.0, {"brightness": 0.3, "contrast": 0.05, "sharpness": 0.02}),
+            candidate("view", 40, 5.0, 5.0, 6.0, {"brightness": 0.52, "contrast": 0.3, "sharpness": 0.12}),
+            candidate("weak", 80, 2.0, 0.2, 0.0, {"brightness": 0.25, "contrast": 0.02, "sharpness": 0.01}),
+        ]
+
+        selected = ah.select_segments_content_first(scored, target_duration=120)
+
+        self.assertEqual([item["id"] for item in selected], ["view"])
 
     def test_split_long_candidate_marks_event_windows(self):
         candidate = ah.Candidate("seg_000", 0, 70, " ".join(["普通對話"] * 4), {})

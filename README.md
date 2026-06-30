@@ -102,10 +102,10 @@ ollama pull qwen2.5vl:7b
 
 ## 最簡單的使用方式
 
-假設你的影片叫 `input.mp4`，想剪成大約 180 秒：
+假設你的影片叫 `input.mp4`，想先用預設規則剪成一支精華：
 
 ```bash
-uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180
+uv run python auto_highlight.py run input.mp4 --out work/video1
 ```
 
 這會跑完整流程：
@@ -124,6 +124,23 @@ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duratio
 ```text
 work/video1/output/highlight.mp4
 ```
+
+## 內容優先剪輯
+
+如果是旅遊、景點、展覽、街景、動物、戶外活動這類影片，不建議先用秒數決定內容。可以改用 `--selection-mode content-first`，讓工具先挑精彩、有趣、亮眼景點或畫面清楚的片段，再用秒數當安全護欄，避免成片失控太長。
+
+推薦指令：
+
+```bash
+uv run python auto_highlight.py run input.mp4 \
+  --out work/video1 \
+  --visuals \
+  --vision-model qwen2.5vl:7b \
+  --selection-mode content-first \
+  --review-mode auto
+```
+
+這個模式尤其依賴 `--visuals`，因為它會抽縮圖、讓本機視覺模型描述畫面，再把湖景、老街、展覽、動物、山景、特殊建築等視覺亮點納入選片。沒有設定 `--target-duration` 時，工具仍會用預設 retention ratio 算出一個長度護欄，但不會為了湊秒數硬塞弱片段。
 
 ## 加上縮圖分析
 
@@ -161,7 +178,7 @@ uv run python auto_highlight.py run input.mp4 \
 uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
-uv run python auto_highlight.py plan work/video1 --target-duration 180
+uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py review-summary work/video1
 uv run python auto_highlight.py render work/video1
@@ -174,7 +191,7 @@ uv run python auto_highlight.py render work/video1
 | 1 | `prepare` | 把影片聲音拿出來，產生逐字稿 |
 | 2 | `analyze-visuals` | 抽縮圖，讓模型描述畫面 |
 | 3 | `score` | 幫候選片段打分數 |
-| 4 | `plan` | 決定最後要剪哪些片段 |
+| 4 | `plan` | 決定最後要剪哪些片段；可用 `--selection-mode content-first` 先看內容亮點 |
 | 5 | `review-gate` | 檢查剪輯計畫可信度，必要時交給 Codex CLI 審稿 |
 | 6 | `review-summary` | 用人看得懂的方式列出信心檢查、已選片段和 near misses |
 | 7 | `render` | 真的輸出精華影片 |
@@ -245,6 +262,7 @@ uv run python auto_highlight.py run input.mp4 \
   --out work/video1 \
   --visuals \
   --vision-model qwen2.5vl:7b \
+  --selection-mode content-first \
   --planner ollama \
   --model qwen3:1.7b \
   --review-mode auto

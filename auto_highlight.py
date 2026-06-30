@@ -121,6 +121,8 @@ MIN_PRE_TARGET_SCORE_RATIO = 0.5
 MIN_HIGHLIGHT_SCORE = 4.5
 HARD_DURATION_EXTRA_SEC = 30.0
 HARD_DURATION_MULTIPLIER = 1.5
+CONTENT_FIRST_SCORE_RATIO = 0.62
+CONTENT_FIRST_MIN_SCORE = 4.0
 CONTACT_SHEET_LABELS = {
     "selected": "Selected",
     "near_miss": "Near Misses",
@@ -1901,6 +1903,66 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
     return sorted(selected, key=lambda item: item["start"])
 
 
+def content_priority_score(candidate: dict[str, Any]) -> float:
+    scores = candidate.get("heuristic_scores", {}) if isinstance(candidate.get("heuristic_scores"), dict) else {}
+    signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+    visual_quality = signals.get("visual_quality", {}) if isinstance(signals.get("visual_quality"), dict) else {}
+    quality_score = visual_quality_score(visual_quality)
+    visual_score = max(
+        number_value(scores.get("visual_event_score"), 0.0),
+        number_value(scores.get("visual_interest_score"), 0.0),
+    )
+    score = (
+        visual_score * 1.7
+        + number_value(scores.get("place_score"), 0.0) * 1.2
+        + number_value(scores.get("focus_score"), 0.0) * 1.1
+        + quality_score * 0.9
+        + number_value(scores.get("emotion_score"), 0.0) * 0.45
+        + number_value(scores.get("keyword_score"), 0.0) * 0.35
+        + number_value(candidate.get("final_score"), 0.0) * 0.55
+    )
+    if number_value(candidate.get("duration_sec"), 0.0) > TARGET_SEGMENT_SECONDS * 1.75 and signals.get("candidate_type") != "subclip":
+        score *= 0.55
+    return round(score, 3)
+
+
+def select_segments_content_first(scored: list[dict[str, Any]], target_duration: float) -> list[dict[str, Any]]:
+    ranked_pool = sorted(
+        [
+            item
+            for item in scored
+            if item.get("is_standalone", True) and item.get("avoid_reason") in (None, "", "none")
+        ],
+        key=lambda item: (content_priority_score(item), number_value(item.get("final_score"), 0.0)),
+        reverse=True,
+    )
+    if not ranked_pool:
+        return []
+
+    top_score = content_priority_score(ranked_pool[0])
+    score_floor = max(CONTENT_FIRST_MIN_SCORE, top_score * CONTENT_FIRST_SCORE_RATIO)
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    selected: list[dict[str, Any]] = []
+    total = 0.0
+    for candidate in ranked_pool:
+        candidate_score = content_priority_score(candidate)
+        if candidate_score < score_floor:
+            break
+        if any(overlap_ratio(candidate, existing) > 0.2 for existing in selected):
+            continue
+        if any(abs(candidate["start"] - existing["start"]) < 4 for existing in selected):
+            continue
+        if any(too_visually_similar(candidate, existing) for existing in selected):
+            continue
+        if selected and total + candidate["duration_sec"] > hard_budget:
+            continue
+        selected.append(candidate)
+        total += candidate["duration_sec"]
+        if len(selected) >= MAX_SELECTED_SEGMENTS:
+            break
+    return sorted(selected, key=lambda item: item["start"])
+
+
 def selection_parameters(scored: list[dict[str, Any]], target_duration: float) -> dict[str, Any]:
     hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
     max_selected = max_segments_for_target(target_duration)
@@ -2009,11 +2071,16 @@ def build_edit_plan(
     target_duration: Optional[float],
     clip_padding: float = DEFAULT_CLIP_PADDING,
     retention_ratio: float = DEFAULT_TARGET_RETENTION_RATIO,
+    selection_mode: str = "duration",
 ) -> dict[str, Any]:
     source = read_json(out_dir / "source.json")
     scored = read_json(out_dir / "scored_segments.json")
     resolved_target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), target_duration, retention_ratio)
-    selected = select_segments(scored, resolved_target_duration)
+    selected = (
+        select_segments_content_first(scored, resolved_target_duration)
+        if selection_mode == "content-first"
+        else select_segments(scored, resolved_target_duration)
+    )
     padded_bounds = padded_segment_bounds(selected, float(source.get("duration_sec", 0.0)), max(0.0, clip_padding))
     segments = []
     for index, item in enumerate(selected):
@@ -2041,6 +2108,7 @@ def build_edit_plan(
         "target_duration_sec": resolved_target_duration,
         "target_duration_source": "explicit" if target_duration is not None else "source_retention_ratio",
         "target_retention_ratio": retention_ratio,
+        "selection_mode": selection_mode,
         "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
         "selected_segments": segments,
     }
@@ -2280,6 +2348,7 @@ def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
     report = ensure_review_report(out_dir)
     selected = selected_scored_items(plan, scored)
     selected_count = len(plan.get("selected_segments", []))
+    content_first = plan.get("selection_mode") == "content-first"
     target_duration = max(1.0, float(plan.get("target_duration_sec", 0.0) or 0.0))
     selected_duration = float(plan.get("selected_duration_sec", 0.0) or 0.0)
     duration_ratio = selected_duration / target_duration
@@ -2294,11 +2363,11 @@ def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
     red_rules = []
     if selected_count == 0:
         red_rules.append({"rule": "selected_segments_zero", "detail": "No selected segments are available to render."})
-    if duration_ratio < 0.45:
+    if not content_first and duration_ratio < 0.45:
         red_rules.append({"rule": "selected_duration_under_45_percent", "value": round(duration_ratio, 3)})
     if fallback_ratio > 0.35:
         red_rules.append({"rule": "fallback_scoring_ratio_over_35_percent", "value": round(fallback_ratio, 3)})
-    if all_selected_clarity_below(selected, 6.0):
+    if not content_first and all_selected_clarity_below(selected, 6.0):
         red_rules.append({"rule": "all_selected_clarity_under_6"})
     for error_name in plan_errors:
         red_rules.append({"rule": "invalid_edit_plan", "detail": error_name})
@@ -2306,7 +2375,7 @@ def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
     yellow_rules = []
     if selected_count < 3:
         yellow_rules.append({"rule": "selected_segments_under_3", "value": selected_count})
-    if duration_ratio < 0.70:
+    if not content_first and duration_ratio < 0.70:
         yellow_rules.append({"rule": "selected_duration_under_70_percent", "value": round(duration_ratio, 3)})
     if near_miss_gap is not None and near_miss_gap < 0.3:
         yellow_rules.append({"rule": "near_miss_score_close_to_selected", "value": round(near_miss_gap, 3)})
@@ -3000,7 +3069,7 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
 
 def command_plan(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
-    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio)
+    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio, args.selection_mode)
     write_json(out_dir / "edit_plan.json", plan)
     write_project_summary(out_dir, plan["target_duration_sec"])
     write_review_report(out_dir)
@@ -3086,6 +3155,7 @@ def command_run(args: argparse.Namespace) -> None:
         target_duration=args.target_duration,
         clip_padding=args.clip_padding,
         retention_ratio=args.retention_ratio,
+        selection_mode=args.selection_mode,
     )
     command_plan(plan_args)
     if args.review_mode != "off":
@@ -3145,6 +3215,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     plan.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
+    plan.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
     plan.set_defaults(func=command_plan)
 
     review_gate = subparsers.add_parser("review-gate", help="Evaluate edit_plan confidence and prepare Codex CLI review packet")
@@ -3198,6 +3269,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     run.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
+    run.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
     run.add_argument("--review-mode", choices=["off", "auto", "always"], default="off", help="Run Scheme C confidence gate before render")
     run.add_argument("--review-top-candidates", type=int, default=20, help="Number of top scored candidates to include in the Codex review packet")
     run.set_defaults(func=command_run)

@@ -965,21 +965,21 @@
             <div class="step-head">
               <span class="step-number">2</span>
               <div>
-                <h3>一行指令跑完整流程</h3>
-                <p class="muted">最簡單的方式是用 <code>run</code>。下面例子會做出大約 180 秒的精華影片，用 <code>qwen2.5vl:7b</code> 看縮圖，並用 <code>qwen3:1.7b</code> 幫文字片段打分。</p>
+                <h3>一行指令跑內容優先流程</h3>
+                <p class="muted">旅遊、景點、展覽或戶外影片建議用 <code>content-first</code>。它會先看縮圖和畫面亮點，再決定要保留哪些片段，秒數只當安全護欄。</p>
               </div>
             </div>
             <div class="mini-art">
               <div class="terminal-art" aria-label="終端機指令示意">
-                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b<br>
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto<br>
                 → 讀影片<br>
-                → 找片段<br>
+                → 找畫面亮點<br>
                 → 輸出 highlight.mp4
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b">複製</button>
-              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b --planner ollama --model qwen3:1.7b</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --review-mode auto</code></pre>
             </div>
           </article>
 
@@ -1000,13 +1000,13 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py apply-review work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py render work/video1">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
 uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
 uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
-uv run python auto_highlight.py plan work/video1 --target-duration 180
+uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
-uv run python auto_highlight.py apply-review work/video1
+uv run python auto_highlight.py review-summary work/video1
 uv run python auto_highlight.py render work/video1</code></pre>
             </div>
           </article>
@@ -1016,7 +1016,7 @@ uv run python auto_highlight.py render work/video1</code></pre>
               <span class="step-number">4</span>
               <div>
                 <h3>打開輸出的精華影片</h3>
-                <p class="muted">完成後，影片會在 <code>work/video1/output/highlight.mp4</code>。如果不滿意，可以調整秒數或重新跑分。</p>
+                <p class="muted">完成後，影片會在 <code>work/video1/output/highlight.mp4</code>。如果不滿意，可以看 <code>review_contact_sheet.jpg</code>，再調整選片模式或重新跑分。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1036,7 +1036,7 @@ uv run python auto_highlight.py render work/video1</code></pre>
 
         <div class="callout">
           <strong>小提醒：</strong>
-          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。
+          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。使用 <code>--review-mode auto</code> 時，yellow 或 red 會先停在 render 前，讓 Codex 審稿後再輸出。
         </div>
       </section>
 
