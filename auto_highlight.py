@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import Counter
+import html
 import json
 import re
 import shutil
@@ -113,6 +114,7 @@ DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
 DEFAULT_TEXT_MODEL = "qwen3:1.7b"
+PROFILE_ARTIFACT = "highlight_profile.json"
 AUTO_RENDER_PROFILES = {
     "1080p": {"output_size": "1920x1080", "video_bitrate": "6000k"},
     "1440p": {"output_size": "2560x1440", "video_bitrate": "10000k"},
@@ -151,6 +153,10 @@ GENERATED_ARTIFACT_FILES = [
     "review_report.json",
     "review_report.md",
     "ffmpeg_concat.txt",
+    "review_report.html",
+    "subtitles.srt",
+    "subtitles.vtt",
+    "subtitles.json",
 ]
 GENERATED_ARTIFACT_DIRS = ["clips", "thumbnails", "output"]
 CONTACT_SHEET_FONT = {
@@ -165,6 +171,60 @@ CONTACT_SHEET_FONT = {
     "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
     "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
     "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+}
+
+BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
+    "default": {
+        "version": "highlight_profile_v1",
+        "name": "default",
+        "description": "General highlight edit.",
+        "keywords": [],
+        "emotion_words": [],
+        "place_words": [],
+        "score_boosts": {},
+        "tag_boosts": {},
+    },
+    "travel": {
+        "version": "highlight_profile_v1",
+        "name": "travel",
+        "description": "Travel, venue, landmark, outdoor, food, and route highlights.",
+        "keywords": ["入口", "出口", "風景", "漂亮", "好美", "到了", "這家", "店家", "招牌", "排隊"],
+        "emotion_words": ["好美", "漂亮", "驚喜"],
+        "place_words": ["入口", "出口", "風景", "地標", "店家", "招牌", "公園", "市場", "展覽", "博物館"],
+        "score_boosts": {"place_score": 0.35, "visual_event_score": 0.25, "focus_score": 0.25, "quality": 0.15},
+        "tag_boosts": {"視覺地點": 0.5, "主體重點": 0.4},
+        "recommended_selection_mode": "content-first",
+    },
+    "family": {
+        "version": "highlight_profile_v1",
+        "name": "family",
+        "description": "Family, kids, pets, reactions, and close interaction.",
+        "keywords": ["寶貝", "可愛", "小朋友", "過來", "看這裡", "抱抱", "親一下", "笑一個"],
+        "emotion_words": ["可愛", "開心", "哈哈", "笑", "哇"],
+        "place_words": [],
+        "score_boosts": {"emotion_score": 0.4, "interaction_score": 0.35, "visual_event_score": 0.25},
+        "tag_boosts": {"反應": 0.5, "情緒": 0.4, "視覺亮點": 0.35},
+    },
+    "teaching": {
+        "version": "highlight_profile_v1",
+        "name": "teaching",
+        "description": "Instructional, demo, explanation, and conclusion highlights.",
+        "keywords": ["重點", "所以", "記得", "你會看到", "示範", "步驟", "總結", "結論", "原因", "方法"],
+        "emotion_words": [],
+        "place_words": [],
+        "score_boosts": {"keyword_score": 0.45, "speech_density_score": 0.25, "interaction_score": 0.15},
+        "tag_boosts": {"對話": 0.25},
+    },
+    "funny": {
+        "version": "highlight_profile_v1",
+        "name": "funny",
+        "description": "Short, punchy, funny, surprising, or reaction-heavy moments.",
+        "keywords": ["笑死", "太扯", "真的假的", "不是吧", "等一下", "尷尬", "糟糕", "完蛋", "好好笑"],
+        "emotion_words": ["笑死", "好好笑", "哈哈", "太扯", "尷尬"],
+        "place_words": [],
+        "score_boosts": {"emotion_score": 0.5, "keyword_score": 0.3, "interaction_score": 0.25},
+        "tag_boosts": {"反應": 0.5, "情緒": 0.5},
+    },
 }
 
 
@@ -206,6 +266,61 @@ def write_json(path: Path, data: Any) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+
+def profile_path(out_dir: Path) -> Path:
+    return out_dir / PROFILE_ARTIFACT
+
+
+def normalize_profile(data: dict[str, Any], name: str = "") -> dict[str, Any]:
+    profile = {
+        **BUILTIN_PROFILES["default"],
+        **data,
+    }
+    profile["version"] = "highlight_profile_v1"
+    profile["name"] = string_value(profile.get("name"), name or "custom")
+    for key in ("keywords", "emotion_words", "place_words"):
+        profile[key] = string_list_value(profile.get(key))
+    for key in ("score_boosts", "tag_boosts"):
+        value = profile.get(key)
+        profile[key] = value if isinstance(value, dict) else {}
+    if profile.get("recommended_selection_mode") not in (None, "", "duration", "content-first"):
+        profile.pop("recommended_selection_mode", None)
+    return profile
+
+
+def load_profile(profile_name: str = "default", profile_file: str = "") -> dict[str, Any]:
+    if profile_file:
+        path = Path(profile_file).expanduser()
+        if not path.exists():
+            raise SystemExit(f"Profile file not found: {path}")
+        data = read_json(path)
+        if not isinstance(data, dict):
+            raise SystemExit("Profile file must contain a JSON object")
+        return normalize_profile(data, path.stem)
+    key = profile_name or "default"
+    if key not in BUILTIN_PROFILES:
+        names = ", ".join(sorted(BUILTIN_PROFILES))
+        raise SystemExit(f"Unknown profile: {key}. Available profiles: {names}")
+    return normalize_profile(BUILTIN_PROFILES[key], key)
+
+
+def load_work_profile(out_dir: Path) -> dict[str, Any]:
+    path = profile_path(out_dir)
+    if not path.exists():
+        return load_profile("default")
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return load_profile("default")
+    return normalize_profile(data, string_value(data.get("name"), "custom"))
+
+
+def write_work_profile(out_dir: Path, profile: dict[str, Any]) -> None:
+    write_json(profile_path(out_dir), normalize_profile(profile, string_value(profile.get("name"), "custom")))
+
+
+def profile_terms(profile: dict[str, Any], key: str) -> list[str]:
+    return string_list_value(profile.get(key))
 
 
 def source_fingerprint(source_video: Path) -> dict[str, Any]:
@@ -611,6 +726,7 @@ def candidate_from_window(
     end: float,
     segments: list[dict[str, Any]],
     duration: float,
+    profile: Optional[dict[str, Any]] = None,
 ) -> Optional[Candidate]:
     start, end = clamp_segment(start, end, duration)
     if end - start < 8:
@@ -618,9 +734,10 @@ def candidate_from_window(
     text = transcript_text_between(segments, start, end)
     if not text:
         return None
-    keywords = text_hits(text, KEYWORDS)
-    emotion_words = text_hits(text, EMOTION_WORDS)
-    place_words = text_hits(text, PLACE_WORDS)
+    profile = profile or {}
+    keywords = text_hits(text, KEYWORDS + profile_terms(profile, "keywords"))
+    emotion_words = text_hits(text, EMOTION_WORDS + profile_terms(profile, "emotion_words"))
+    place_words = text_hits(text, PLACE_WORDS + profile_terms(profile, "place_words"))
     utterances = [seg for seg in segments if seg["end"] > start and seg["start"] < end]
     speech_seconds = sum(max(0.0, min(end, seg["end"]) - max(start, seg["start"])) for seg in utterances)
     density = min(1.0, speech_seconds / max(1.0, end - start))
@@ -632,6 +749,9 @@ def candidate_from_window(
         "utterance_count": len(utterances),
         "question_exclamation_count": sum(text.count(ch) for ch in ("?", "？", "!", "！")),
     }
+    profile_hits = text_hits(text, profile_terms(profile, "keywords"))
+    if profile_hits:
+        signals["profile_keywords"] = profile_hits
     return Candidate(candidate_id, round(start, 3), round(end, 3), text, signals)
 
 
@@ -657,6 +777,7 @@ def merge_two_candidates(left: Candidate, right: Candidate) -> Candidate:
         "keywords": sorted(set(left.signals.get("keywords", []) + right.signals.get("keywords", []))),
         "emotion_words": sorted(set(left.signals.get("emotion_words", []) + right.signals.get("emotion_words", []))),
         "place_words": sorted(set(left.signals.get("place_words", []) + right.signals.get("place_words", []))),
+        "profile_keywords": sorted(set(left.signals.get("profile_keywords", []) + right.signals.get("profile_keywords", []))),
         "speech_density": round(max(left.signals.get("speech_density", 0), right.signals.get("speech_density", 0)), 3),
         "utterance_count": left.signals.get("utterance_count", 0) + right.signals.get("utterance_count", 0),
         "question_exclamation_count": left.signals.get("question_exclamation_count", 0)
@@ -706,6 +827,7 @@ def split_long_candidate(
     duration: float,
     target_duration: float = 24.0,
     step: float = 16.0,
+    profile: Optional[dict[str, Any]] = None,
 ) -> list[Candidate]:
     if candidate.duration < 32:
         return []
@@ -714,9 +836,9 @@ def split_long_candidate(
     for utterance in utterances:
         text = utterance["text"]
         score = (
-            len(text_hits(text, KEYWORDS)) * 2.5
-            + len(text_hits(text, EMOTION_WORDS)) * 1.5
-            + len(text_hits(text, PLACE_WORDS)) * 0.8
+            len(text_hits(text, KEYWORDS + profile_terms(profile or {}, "keywords"))) * 2.5
+            + len(text_hits(text, EMOTION_WORDS + profile_terms(profile or {}, "emotion_words"))) * 1.5
+            + len(text_hits(text, PLACE_WORDS + profile_terms(profile or {}, "place_words"))) * 0.8
             + sum(text.count(ch) for ch in ("?", "？", "!", "！")) * 0.8
             + 0.4
         )
@@ -747,7 +869,7 @@ def split_long_candidate(
 
     splits: list[Candidate] = []
     for score, start, end, reason in ordered_windows:
-        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", start, end, segments, duration)
+        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", start, end, segments, duration, profile)
         if split and split.duration >= 12:
             signals = {
                 **split.signals,
@@ -760,22 +882,24 @@ def split_long_candidate(
     return splits
 
 
-def expand_with_subclips(candidates: list[Candidate], segments: list[dict[str, Any]], duration: float) -> list[Candidate]:
+def expand_with_subclips(candidates: list[Candidate], segments: list[dict[str, Any]], duration: float, profile: Optional[dict[str, Any]] = None) -> list[Candidate]:
     expanded: list[Candidate] = []
     for candidate in candidates:
         expanded.append(candidate)
-        expanded.extend(split_long_candidate(candidate, segments, duration))
+        expanded.extend(split_long_candidate(candidate, segments, duration, profile=profile))
     return expanded
 
 
-def generate_candidates_from_transcript(transcript: dict[str, Any], source_duration: Optional[float] = None) -> list[dict[str, Any]]:
+def generate_candidates_from_transcript(transcript: dict[str, Any], source_duration: Optional[float] = None, profile: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     segments = transcript_segments(transcript)
     duration = source_duration or float(transcript.get("duration_sec") or (segments[-1]["end"] if segments else 0.0))
     raw: list[Candidate] = []
+    profile = profile or {}
+    keyword_terms = KEYWORDS + profile_terms(profile, "keywords")
 
     for seg in segments:
-        if text_hits(seg["text"], KEYWORDS):
-            candidate = candidate_from_window(f"raw_{len(raw):04d}", seg["start"] - 8, seg["end"] + 20, segments, duration)
+        if text_hits(seg["text"], keyword_terms):
+            candidate = candidate_from_window(f"raw_{len(raw):04d}", seg["start"] - 8, seg["end"] + 20, segments, duration, profile)
             if candidate:
                 raw.append(candidate)
 
@@ -783,20 +907,20 @@ def generate_candidates_from_transcript(transcript: dict[str, Any], source_durat
     step = 10.0
     cursor = 0.0
     while cursor < duration:
-        candidate = candidate_from_window(f"raw_{len(raw):04d}", cursor, min(duration, cursor + window_size), segments, duration)
+        candidate = candidate_from_window(f"raw_{len(raw):04d}", cursor, min(duration, cursor + window_size), segments, duration, profile)
         if candidate and quick_window_score(candidate) >= 2.5:
             raw.append(candidate)
         cursor += step
 
-    raw.extend(generate_speech_cluster_candidates(segments, duration))
+    raw.extend(generate_speech_cluster_candidates(segments, duration, profile))
 
     merged = merge_candidates(raw)
     trimmed = [trim_candidate(candidate) for candidate in merged if candidate.duration >= 8]
-    expanded = expand_with_subclips(trimmed, segments, duration)
+    expanded = expand_with_subclips(trimmed, segments, duration, profile)
     return [candidate_to_dict(renumber_candidate(candidate, i)) for i, candidate in enumerate(expanded)]
 
 
-def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration: float) -> list[Candidate]:
+def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration: float, profile: Optional[dict[str, Any]] = None) -> list[Candidate]:
     clusters: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for segment in segments:
@@ -813,7 +937,7 @@ def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration:
     for cluster in clusters:
         start = cluster[0]["start"] - 5
         end = cluster[-1]["end"] + 7
-        candidate = candidate_from_window(f"raw_{len(candidates):04d}", start, end, segments, duration)
+        candidate = candidate_from_window(f"raw_{len(candidates):04d}", start, end, segments, duration, profile)
         if candidate:
             signals = {**candidate.signals, "fallback_reason": "speech_cluster"}
             candidates.append(Candidate(candidate.id, candidate.start, candidate.end, candidate.transcript, signals))
@@ -1757,6 +1881,49 @@ def final_score_from_scores(heuristic: dict[str, float], llm_scores: Optional[di
     )
 
 
+def profile_score_adjustment(candidate: dict[str, Any], profile: dict[str, Any]) -> float:
+    if not profile or profile.get("name") == "default":
+        return 0.0
+    boosts = profile.get("score_boosts", {}) if isinstance(profile.get("score_boosts"), dict) else {}
+    tag_boosts = profile.get("tag_boosts", {}) if isinstance(profile.get("tag_boosts"), dict) else {}
+    heuristic = candidate.get("heuristic_scores", {}) if isinstance(candidate.get("heuristic_scores"), dict) else {}
+    adjustment = 0.0
+    for key, weight in boosts.items():
+        if key == "quality":
+            quality = candidate.get("signals", {}).get("visual_quality", {})
+            adjustment += visual_quality_score(quality if isinstance(quality, dict) else {}) * number_value(weight, 0.0)
+        else:
+            adjustment += number_value(heuristic.get(key), 0.0) * number_value(weight, 0.0)
+    tags = set(string_list_value(candidate.get("tags")))
+    for tag, boost in tag_boosts.items():
+        if str(tag) in tags:
+            adjustment += number_value(boost, 0.0)
+    profile_keyword_hits = candidate.get("signals", {}).get("profile_keywords", [])
+    adjustment += min(1.5, len(profile_keyword_hits) * 0.35)
+    return round(min(3.0, max(0.0, adjustment)), 3)
+
+
+def apply_profile_scoring(scored: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    if not profile or profile.get("name") == "default":
+        return scored
+    adjusted = []
+    for candidate in scored:
+        boost = profile_score_adjustment(candidate, profile)
+        if boost <= 0:
+            adjusted.append({**candidate, "profile_name": profile.get("name", "")})
+            continue
+        adjusted.append(
+            {
+                **candidate,
+                "profile_name": profile.get("name", ""),
+                "profile_score": boost,
+                "profile_adjusted_from": candidate.get("final_score"),
+                "final_score": round(number_value(candidate.get("final_score"), 0.0) + boost, 3),
+            }
+        )
+    return sorted(adjusted, key=lambda item: item["final_score"], reverse=True)
+
+
 def compact_candidate_for_llm(candidate: dict[str, Any]) -> dict[str, Any]:
     signals = candidate.get("signals", {})
     vision = signals.get("vision", {}) if isinstance(signals.get("vision"), dict) else {}
@@ -2182,6 +2349,7 @@ def build_edit_plan(
 ) -> dict[str, Any]:
     source = read_json(out_dir / "source.json")
     scored = read_json(out_dir / "scored_segments.json")
+    profile = load_work_profile(out_dir)
     resolved_target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), target_duration, retention_ratio)
     selected = (
         select_segments_content_first(scored, resolved_target_duration)
@@ -2216,6 +2384,11 @@ def build_edit_plan(
         "target_duration_source": "explicit" if target_duration is not None else "source_retention_ratio",
         "target_retention_ratio": retention_ratio,
         "selection_mode": selection_mode,
+        "highlight_profile": {
+            "name": profile.get("name", "default"),
+            "description": profile.get("description", ""),
+            "recommended_selection_mode": profile.get("recommended_selection_mode", ""),
+        },
         "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
         "selected_segments": segments,
     }
@@ -2290,6 +2463,9 @@ def selected_segment_details(plan: dict[str, Any], scored: list[dict[str, Any]])
                 "summary": scored_item.get("summary") or planned.get("reason", ""),
                 "reason": planned.get("reason", ""),
                 "final_score": planned.get("final_score", scored_item.get("final_score")),
+                "profile_score": scored_item.get("profile_score", 0.0),
+                "profile_adjusted_from": scored_item.get("profile_adjusted_from"),
+                "profile_name": scored_item.get("profile_name", ""),
                 "tags": scored_item.get("tags", []),
                 "scores": scored_item.get("scores", {}),
                 "heuristic_scores": scored_item.get("heuristic_scores", {}),
@@ -2927,6 +3103,7 @@ def render_review_markdown(report: dict[str, Any]) -> str:
                 "",
                 f"- Role/time: {segment['role']} at {segment['time']} ({segment['duration_sec']}s)",
                 f"- Score/source: {segment.get('final_score', '-')} from {segment.get('scoring_source') or 'unknown'}",
+                f"- Profile boost: {segment.get('profile_score', 0)} from {segment.get('profile_name') or '-'}",
                 f"- Tags: {compact_list(segment.get('tags'))}",
                 f"- Reason: {segment.get('reason') or segment.get('summary') or '-'}",
                 f"- Transcript: {segment.get('transcript_excerpt') or '-'}",
@@ -2962,6 +3139,232 @@ def render_review_markdown(report: dict[str, Any]) -> str:
             )
     lines.append("")
     return "\n".join(lines)
+
+
+def html_text(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
+
+
+def html_image_grid(out_dir: Path, segment: dict[str, Any]) -> str:
+    paths = thumbnail_paths(segment)
+    if not paths:
+        return '<div class="muted">No thumbnails</div>'
+    images = []
+    for path in paths[:3]:
+        resolved = out_dir / path
+        src = html.escape(path)
+        if not resolved.exists():
+            images.append(f'<div class="thumb missing">{html_text(path)}</div>')
+        else:
+            images.append(f'<img class="thumb" src="{src}" alt="{html_text(segment.get("segment_id", ""))} thumbnail">')
+    return '<div class="thumbs">' + "".join(images) + "</div>"
+
+
+def render_segment_card(out_dir: Path, segment: dict[str, Any], kind: str) -> str:
+    score = html_text(segment.get("final_score", "-"))
+    tags = html_text(compact_list(segment.get("tags")))
+    skip = segment.get("skip_reason", "")
+    skip_html = f'<div class="pill warn">{html_text(skip)}</div>' if skip else ""
+    profile_score = number_value(segment.get("profile_score"), 0.0)
+    profile_html = ""
+    if profile_score:
+        profile_html = f'<span class="meta">profile +{html_text(profile_score)}</span>'
+    return f"""
+    <article class="segment {html.escape(kind)}">
+      <div class="segment-main">
+        <div class="kicker">{html_text(segment.get("role") or kind)} · {html_text(segment.get("time", ""))}</div>
+        <h3>{html_text(segment.get("title") or segment.get("segment_id"))}</h3>
+        <div class="row">
+          <span class="score">score {score}</span>
+          {profile_html}
+          <span class="meta">{tags}</span>
+          {skip_html}
+        </div>
+        <p>{html_text(segment.get("summary") or segment.get("reason") or "-")}</p>
+        <dl>
+          <dt>Transcript</dt><dd>{html_text(segment.get("transcript_excerpt") or "-")}</dd>
+          <dt>Visual</dt><dd>{html_text(segment.get("visual_description") or "-")}</dd>
+          <dt>Subjects</dt><dd>{html_text(compact_list(segment.get("visual_subjects")))}</dd>
+          <dt>Focus</dt><dd>{html_text(compact_list([item.get("display", "") for item in segment.get("focus_matches", [])]) if segment.get("focus_matches") else segment.get("focus_score", 0))}</dd>
+        </dl>
+      </div>
+      {html_image_grid(out_dir, segment)}
+    </article>
+    """
+
+
+def render_review_html(report: dict[str, Any], out_dir: Path) -> str:
+    focus_summary = report.get("project_focus", {}).get("summary", "")
+    selected_cards = "\n".join(render_segment_card(out_dir, segment, "selected") for segment in report.get("selected_segments", []))
+    near_miss_cards = "\n".join(render_segment_card(out_dir, segment, "near-miss") for segment in report.get("near_miss_segments", []))
+    contact_sheet = str(report.get("contact_sheet") or "")
+    contact_sheet_html = ""
+    if contact_sheet and (out_dir / contact_sheet).exists():
+        contact_sheet_html = f'<section><h2>Contact Sheet</h2><img class="contact" src="{html.escape(contact_sheet)}" alt="contact sheet"></section>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Highlight Review Report</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f6f7f2;
+      --ink: #1f2428;
+      --muted: #687076;
+      --line: #d9ded6;
+      --panel: #ffffff;
+      --accent: #18777f;
+      --warn: #9f5b00;
+    }}
+    body {{
+      margin: 0;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }}
+    header, main {{
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+    }}
+    header {{
+      padding: 28px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }}
+    h2 {{
+      margin: 28px 0 12px;
+      font-size: 20px;
+    }}
+    h3 {{
+      margin: 4px 0 8px;
+      font-size: 18px;
+    }}
+    .summary {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .metric, .segment {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }}
+    .metric {{
+      padding: 12px;
+    }}
+    .metric b {{
+      display: block;
+      font-size: 20px;
+    }}
+    .muted, .meta, .kicker {{
+      color: var(--muted);
+    }}
+    .segment {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(190px, 280px);
+      gap: 16px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }}
+    .row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }}
+    .score, .pill {{
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: #e6f3f1;
+      color: var(--accent);
+      font-weight: 650;
+      font-size: 13px;
+    }}
+    .warn {{
+      background: #fff1d7;
+      color: var(--warn);
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: 90px minmax(0, 1fr);
+      gap: 6px 12px;
+      margin: 10px 0 0;
+    }}
+    dt {{
+      color: var(--muted);
+    }}
+    dd {{
+      margin: 0;
+    }}
+    .thumbs {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }}
+    .thumb {{
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #eef0ec;
+    }}
+    .missing {{
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px;
+      box-sizing: border-box;
+    }}
+    .contact {{
+      max-width: 100%;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }}
+    @media (max-width: 760px) {{
+      .segment {{
+        grid-template-columns: 1fr;
+      }}
+      dl {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Highlight Review Report</h1>
+    <div class="muted">{html_text(report.get("source_video", ""))}</div>
+    <div class="summary">
+      <div class="metric"><b>{html_text(report.get("selected_count", 0))}</b>selected clips</div>
+      <div class="metric"><b>{html_text(report.get("selected_duration_sec", 0))}s</b>selected duration</div>
+      <div class="metric"><b>{html_text(report.get("target_duration_sec", 0))}s</b>target duration</div>
+      <div class="metric"><b>{html_text(focus_summary or "-")}</b>project focus</div>
+    </div>
+  </header>
+  <main>
+    {contact_sheet_html}
+    <section>
+      <h2>Selected Segments</h2>
+      {selected_cards or '<div class="muted">No selected segments.</div>'}
+    </section>
+    <section>
+      <h2>Near Misses</h2>
+      {near_miss_cards or '<div class="muted">No near misses.</div>'}
+    </section>
+  </main>
+</body>
+</html>
+"""
 
 
 def contact_sheet_inputs(report: dict[str, Any], out_dir: Path) -> list[Path]:
@@ -3086,7 +3489,198 @@ def write_review_report(out_dir: Path) -> dict[str, Any]:
     write_contact_sheet(out_dir, report)
     write_json(out_dir / "review_report.json", report)
     (out_dir / "review_report.md").write_text(render_review_markdown(report), encoding="utf-8")
+    (out_dir / "review_report.html").write_text(render_review_html(report, out_dir), encoding="utf-8")
     return report
+
+
+def srt_timestamp(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    whole_seconds = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        whole_seconds += 1
+        millis -= 1000
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{millis:03d}"
+
+
+def vtt_timestamp(seconds: float) -> str:
+    return srt_timestamp(seconds).replace(",", ".")
+
+
+def subtitle_text(text: str, max_chars: int = 46) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    midpoint = len(compact) // 2
+    split = compact.rfind(" ", 0, midpoint)
+    if split < max_chars * 0.25:
+        split = compact.find(" ", midpoint)
+    if split <= 0:
+        return compact
+    return compact[:split].strip() + "\n" + compact[split + 1 :].strip()
+
+
+def subtitle_cues_for_plan(out_dir: Path) -> list[dict[str, Any]]:
+    plan = read_json(out_dir / "edit_plan.json")
+    transcript = read_json(out_dir / "transcript.json")
+    segments = transcript_segments(transcript)
+    cues = []
+    output_cursor = 0.0
+    for planned in plan.get("selected_segments", []):
+        source_start = float(planned.get("source_start", 0.0))
+        source_end = float(planned.get("source_end", 0.0))
+        clip_duration = max(0.0, source_end - source_start)
+        for segment in segments:
+            text = string_value(segment.get("text"))
+            if not text or segment["end"] <= source_start or segment["start"] >= source_end:
+                continue
+            cue_start = output_cursor + max(0.0, float(segment["start"]) - source_start)
+            cue_end = output_cursor + min(clip_duration, float(segment["end"]) - source_start)
+            if cue_end - cue_start < 0.2:
+                continue
+            cues.append(
+                {
+                    "start": round(cue_start, 3),
+                    "end": round(cue_end, 3),
+                    "text": subtitle_text(text),
+                    "source_start": max(source_start, float(segment["start"])),
+                    "source_end": min(source_end, float(segment["end"])),
+                    "segment_id": planned.get("segment_id", ""),
+                }
+            )
+        output_cursor += clip_duration
+    return cues
+
+
+def render_srt(cues: list[dict[str, Any]]) -> str:
+    blocks = []
+    for index, cue in enumerate(cues, start=1):
+        blocks.append(
+            f"{index}\n"
+            f"{srt_timestamp(float(cue['start']))} --> {srt_timestamp(float(cue['end']))}\n"
+            f"{cue['text']}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def render_vtt(cues: list[dict[str, Any]]) -> str:
+    blocks = ["WEBVTT", ""]
+    for cue in cues:
+        blocks.append(f"{vtt_timestamp(float(cue['start']))} --> {vtt_timestamp(float(cue['end']))}")
+        blocks.append(str(cue["text"]))
+        blocks.append("")
+    return "\n".join(blocks)
+
+
+def write_subtitles(out_dir: Path) -> dict[str, Any]:
+    cues = subtitle_cues_for_plan(out_dir)
+    srt_path = out_dir / "subtitles.srt"
+    vtt_path = out_dir / "subtitles.vtt"
+    srt_path.write_text(render_srt(cues), encoding="utf-8")
+    vtt_path.write_text(render_vtt(cues), encoding="utf-8")
+    result = {
+        "version": "subtitle_export_v1",
+        "cue_count": len(cues),
+        "srt_path": str(srt_path),
+        "vtt_path": str(vtt_path),
+    }
+    write_json(out_dir / "subtitles.json", result)
+    return result
+
+
+def artifact_mtime(path: Path) -> float:
+    return path.stat().st_mtime if path.exists() else 0.0
+
+
+def stale_after(target: Path, dependencies: list[Path]) -> bool:
+    if not target.exists():
+        return True
+    target_mtime = artifact_mtime(target)
+    return any(path.exists() and artifact_mtime(path) > target_mtime for path in dependencies)
+
+
+def doctor_check(out_dir: Path) -> dict[str, Any]:
+    checks = []
+
+    def add(name: str, status: str, detail: str = "") -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    source_path = out_dir / "source.json"
+    if not source_path.exists():
+        add("source.json", "error", "missing")
+        return {"version": "doctor_report_v1", "status": "error", "checks": checks}
+
+    try:
+        source = read_json(source_path)
+    except json.JSONDecodeError as exc:
+        add("source.json", "error", f"invalid JSON: {exc}")
+        return {"version": "doctor_report_v1", "status": "error", "checks": checks}
+
+    source_video = Path(str(source.get("source_video", ""))).expanduser()
+    if not source_video.exists():
+        add("source_video", "error", f"missing: {source_video}")
+    else:
+        current = {"source_video": str(source_video), "fingerprint": source_fingerprint(source_video)}
+        add("source_fingerprint", "ok" if source_matches(source, current) else "error", "source video changed since prepare")
+
+    required = ["transcript.json", "candidates.json", "scored_segments.json", "edit_plan.json"]
+    for name in required:
+        add(name, "ok" if (out_dir / name).exists() else "error", "missing" if not (out_dir / name).exists() else "")
+
+    dependencies = {
+        "candidates.json": ["transcript.json"],
+        "scored_segments.json": ["candidates.json", "visual_segments.json", PROFILE_ARTIFACT],
+        "edit_plan.json": ["scored_segments.json"],
+        "review_report.json": ["edit_plan.json", "scored_segments.json"],
+        "review_report.html": ["review_report.json"],
+        "subtitles.srt": ["edit_plan.json", "transcript.json"],
+        "subtitles.vtt": ["edit_plan.json", "transcript.json"],
+    }
+    for target_name, dependency_names in dependencies.items():
+        target = out_dir / target_name
+        deps = [out_dir / name for name in dependency_names]
+        if target.exists() and stale_after(target, deps):
+            newer = [name for name in dependency_names if (out_dir / name).exists() and artifact_mtime(out_dir / name) > artifact_mtime(target)]
+            add(target_name, "warn", "stale after " + ", ".join(newer))
+
+    plan_path = out_dir / "edit_plan.json"
+    if plan_path.exists():
+        try:
+            plan = read_json(plan_path)
+            duration = float(source.get("duration_sec", 0.0) or 0.0)
+            errors = validate_edit_plan(plan, duration)
+            add("edit_plan_valid", "ok" if not errors else "error", "; ".join(errors))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            add("edit_plan_valid", "error", str(exc))
+
+    visual_path = out_dir / "visual_segments.json"
+    scored_path = out_dir / "scored_segments.json"
+    if visual_path.exists() and scored_path.exists():
+        visual_ids = {item.get("id") for item in read_json(visual_path) if isinstance(item, dict)}
+        scored_ids = {item.get("id") for item in read_json(scored_path) if isinstance(item, dict)}
+        missing_visuals = sorted(str(item) for item in scored_ids - visual_ids if item)
+        if missing_visuals:
+            add("visual_coverage", "warn", f"{len(missing_visuals)} scored segments lack visual metadata")
+        else:
+            add("visual_coverage", "ok")
+
+    output_video = out_dir / "output" / "highlight.mp4"
+    if output_video.exists() and plan_path.exists() and artifact_mtime(plan_path) > artifact_mtime(output_video):
+        add("output/highlight.mp4", "warn", "stale after edit_plan.json")
+    elif output_video.exists():
+        add("output/highlight.mp4", "ok")
+    else:
+        add("output/highlight.mp4", "warn", "not rendered yet")
+
+    if any(check["status"] == "error" for check in checks):
+        status = "error"
+    elif any(check["status"] == "warn" for check in checks):
+        status = "warn"
+    else:
+        status = "ok"
+    return {"version": "doctor_report_v1", "status": status, "checks": checks}
 
 
 def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
@@ -3130,21 +3724,24 @@ def command_prepare(args: argparse.Namespace) -> None:
     if not source_video.exists():
         raise SystemExit(f"Input video not found: {source_video}")
     out_dir = Path(args.out)
+    profile = load_profile(getattr(args, "profile", "default"), getattr(args, "profile_file", ""))
     init_work_dir(out_dir, source_video, args.force)
     if args.force:
         invalidate_generated_artifacts(out_dir)
         ensure_work_subdirs(out_dir)
+    write_work_profile(out_dir, profile)
     audio_path = extract_audio(source_video, out_dir, args.force)
     transcript_path = transcribe_audio(audio_path, out_dir, args.whisper_model, args.force)
     transcript = read_json(transcript_path)
     source = read_json(out_dir / "source.json")
-    candidates = generate_candidates_from_transcript(transcript, source["duration_sec"])
+    candidates = generate_candidates_from_transcript(transcript, source["duration_sec"], profile)
     write_json(out_dir / "candidates.json", candidates)
     log(f"Wrote {len(candidates)} candidates to {out_dir / 'candidates.json'}")
 
 
 def command_score(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
+    profile = load_work_profile(out_dir)
     source = read_json(out_dir / "source.json")
     target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), args.target_duration, args.retention_ratio)
     candidates = read_json(out_dir / "candidates.json")
@@ -3157,7 +3754,7 @@ def command_score(args: argparse.Namespace) -> None:
     project_focus = infer_project_focus(candidates)
     write_json(out_dir / "project_focus.json", project_focus)
     candidates = attach_focus_signals(candidates, project_focus)
-    scored = score_candidates(candidates, args.planner, args.model)
+    scored = apply_profile_scoring(score_candidates(candidates, args.planner, args.model), profile)
     write_json(out_dir / "scored_segments.json", scored)
     write_project_summary(out_dir, target_duration)
     log(f"Wrote {len(scored)} scored segments to {out_dir / 'scored_segments.json'}")
@@ -3221,10 +3818,38 @@ def command_apply_review(args: argparse.Namespace) -> None:
 def command_report(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
     report = write_review_report(out_dir)
-    log(f"Wrote review report for {report['selected_count']} segments to {out_dir / 'review_report.md'}")
+    log(f"Wrote review report for {report['selected_count']} segments to {out_dir / 'review_report.md'} and {out_dir / 'review_report.html'}")
+
+
+def command_subtitles(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    result = write_subtitles(out_dir)
+    log(f"Wrote {result['cue_count']} subtitle cues to {out_dir / 'subtitles.srt'} and {out_dir / 'subtitles.vtt'}")
+
+
+def command_profiles(args: argparse.Namespace) -> None:
+    for name in sorted(BUILTIN_PROFILES):
+        profile = BUILTIN_PROFILES[name]
+        recommended = profile.get("recommended_selection_mode", "")
+        suffix = f" (recommended selection: {recommended})" if recommended else ""
+        log(f"{name}: {profile.get('description', '')}{suffix}")
+
+
+def command_doctor(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    report = doctor_check(out_dir)
+    write_json(out_dir / "doctor_report.json", report)
+    log(f"Doctor status: {report['status']}")
+    for check in report.get("checks", []):
+        detail = f" - {check['detail']}" if check.get("detail") else ""
+        log(f"{check['status'].upper()}: {check['name']}{detail}")
+    if report["status"] == "error":
+        raise SystemExit(1)
 
 
 def command_render(args: argparse.Namespace) -> None:
+    if getattr(args, "subtitles", False):
+        write_subtitles(Path(args.work_dir))
     settings = RenderSettings(
         output_size=args.output_size,
         crf=args.crf,
@@ -3238,7 +3863,14 @@ def command_render(args: argparse.Namespace) -> None:
 
 
 def command_run(args: argparse.Namespace) -> None:
-    prepare_args = argparse.Namespace(input=args.input, out=args.out, whisper_model=args.whisper_model, force=args.force)
+    prepare_args = argparse.Namespace(
+        input=args.input,
+        out=args.out,
+        whisper_model=args.whisper_model,
+        force=args.force,
+        profile=getattr(args, "profile", "default"),
+        profile_file=getattr(args, "profile_file", ""),
+    )
     command_prepare(prepare_args)
     if args.visuals:
         command_analyze_visuals(
@@ -3281,6 +3913,7 @@ def command_run(args: argparse.Namespace) -> None:
     command_render(
         argparse.Namespace(
             work_dir=args.out,
+            subtitles=True,
             output_size=args.output_size,
             crf=args.crf,
             preset=args.preset,
@@ -3301,6 +3934,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--out", required=True, help="Work directory")
     prepare.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     prepare.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
+    prepare.add_argument("--profile", choices=sorted(BUILTIN_PROFILES), default="default", help="Built-in highlight style profile")
+    prepare.add_argument("--profile-file", default="", help="Custom highlight profile JSON file")
     prepare.set_defaults(func=command_prepare)
 
     score = subparsers.add_parser("score", help="Score candidate segments")
@@ -3348,8 +3983,20 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("work_dir", help="Work directory")
     report.set_defaults(func=command_report)
 
+    subtitles = subparsers.add_parser("subtitles", help="Export subtitles.srt and subtitles.vtt for the rendered highlight timeline")
+    subtitles.add_argument("work_dir", help="Work directory")
+    subtitles.set_defaults(func=command_subtitles)
+
+    doctor = subparsers.add_parser("doctor", help="Check work artifacts for missing, stale, or invalid pipeline state")
+    doctor.add_argument("work_dir", help="Work directory")
+    doctor.set_defaults(func=command_doctor)
+
+    profiles = subparsers.add_parser("profiles", help="List built-in highlight style profiles")
+    profiles.set_defaults(func=command_profiles)
+
     render = subparsers.add_parser("render", help="Render highlight.mp4 from edit_plan.json")
     render.add_argument("work_dir", help="Work directory")
+    render.add_argument("--subtitles", action="store_true", help="Also export subtitles.srt and subtitles.vtt before rendering")
     render.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
     render.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
     render.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
@@ -3368,6 +4015,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default=DEFAULT_TEXT_MODEL, help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     run.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
+    run.add_argument("--profile", choices=sorted(BUILTIN_PROFILES), default="default", help="Built-in highlight style profile")
+    run.add_argument("--profile-file", default="", help="Custom highlight profile JSON file")
     run.add_argument("--visuals", action="store_true", help="Analyze thumbnails and optional OCR before scoring")
     run.add_argument("--thumbnail-count", type=int, default=3)
     run.add_argument("--ocr-languages", default="chi_tra+eng")

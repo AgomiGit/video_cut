@@ -44,12 +44,18 @@ Implemented first slice:
 - `apply-review` command.
 - Validation and application of `codex_review_result.json`.
 - Backup of the previous plan to `edit_plan.before_codex_review.json` before reviewed changes are applied.
+- `review-summary` command for human-readable handoff.
+- `review_report.html` alongside JSON/Markdown review reports.
+- `doctor` command to detect stale/missing artifacts before review.
+- `subtitles` command to export final highlight SRT/VTT.
+- Highlight profile metadata included in plans and scoring artifacts.
 
 Not implemented yet:
 
 - External OpenAI/GPT provider integration.
 - Automatic application of a remote GPT response.
 - Remote-provider response fetching.
+- Burned-in subtitles during render.
 
 ## Architecture Decisions
 

@@ -45,6 +45,7 @@ This repository has no commit history yet, so use concise imperative commit mess
 ## Agent-Specific Instructions
 
 Check for existing generated outputs before writing into `work/`. Preserve user-created media and plans unless explicitly asked to regenerate them.
+Read `PROJECT_MEMORY.md` at the start of future work to catch up on the current implementation status, latest handoff notes, and likely next steps.
 
 ## Codex CLI Operating Mode
 

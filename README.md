@@ -145,6 +145,48 @@ uv run python auto_highlight.py run input.mp4 \
 
 `--quality-mode auto` 會看最後入選片段的亮度、銳利度和室內外比例，自動在 1080p、1440p、4K 之間選輸出規格。多數片段是低光室內或粗顆粒時會偏向 1080p；多數是清楚戶外景點時才會輸出 4K。
 
+## 剪輯風格 preset
+
+如果你想讓工具用不同口味挑片，可以加 `--profile`：
+
+```bash
+uv run python auto_highlight.py run input.mp4 \
+  --out work/video1 \
+  --profile travel \
+  --visuals \
+  --selection-mode content-first
+```
+
+目前內建：
+
+- `default`：一般精華
+- `travel`：旅遊、景點、展覽、地標、美食、戶外畫面
+- `family`：家人、小孩、寵物、反應、互動
+- `teaching`：教學、示範、重點句、結論
+- `funny`：好笑、驚訝、短節奏反應
+
+查看內建 profile：
+
+```bash
+uv run python auto_highlight.py profiles
+```
+
+也可以用自己的 JSON：
+
+```bash
+uv run python auto_highlight.py run input.mp4 \
+  --out work/video1 \
+  --profile-file my_profile.json
+```
+
+每次 run 會把當次設定寫到：
+
+```text
+work/video1/highlight_profile.json
+```
+
+之後 `score` 會讀這份設定，並在 `scored_segments.json` 裡留下 `profile_score`、`profile_adjusted_from` 和 `profile_name`，方便檢查 preset 影響了哪些片段。
+
 ## 加上縮圖分析
 
 如果你想讓工具也看影片縮圖，可以加上 `--visuals`：
@@ -184,6 +226,8 @@ uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3
 uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py review-summary work/video1
+uv run python auto_highlight.py subtitles work/video1
+uv run python auto_highlight.py doctor work/video1
 uv run python auto_highlight.py render work/video1 --quality-mode auto
 ```
 
@@ -197,7 +241,9 @@ uv run python auto_highlight.py render work/video1 --quality-mode auto
 | 4 | `plan` | 決定最後要剪哪些片段；可用 `--selection-mode content-first` 先看內容亮點 |
 | 5 | `review-gate` | 檢查剪輯計畫可信度，必要時交給 Codex CLI 審稿 |
 | 6 | `review-summary` | 用人看得懂的方式列出信心檢查、已選片段和 near misses |
-| 7 | `render` | 真的輸出精華影片；可用 `--quality-mode auto` 自動選 1080p、1440p 或 4K |
+| 7 | `subtitles` | 從逐字稿和剪輯計畫產生 `subtitles.srt` 和 `subtitles.vtt` |
+| 8 | `doctor` | 檢查 artifact 是否缺漏、過期或和來源影片不一致 |
+| 9 | `render` | 真的輸出精華影片；可用 `--quality-mode auto` 自動選 1080p、1440p 或 4K |
 
 ## 輸出資料夾長什麼樣？
 
@@ -216,6 +262,9 @@ work/video1/
   plan_confidence.json
   gpt_review_packet.json
   review_report.md
+  review_report.html
+  subtitles.srt
+  subtitles.vtt
   clips/
   thumbnails/
   output/
@@ -232,7 +281,30 @@ work/video1/
 | `edit_plan.json` | 剪輯計畫 | 最後要剪哪幾段 |
 | `plan_confidence.json` | 信心檢查 | 判斷目前計畫是 green、yellow 還是 red |
 | `gpt_review_packet.json` | 審稿資料包 | 給 Codex CLI 接手 yellow/red 時看的摘要資料 |
+| `review_report.html` | 圖文審稿頁 | 用瀏覽器查看 selected clips、near misses、縮圖和分數 |
+| `subtitles.srt` / `subtitles.vtt` | 字幕 | 對齊最後 highlight 時間軸的字幕檔 |
 | `output/highlight.mp4` | 成品 | 最後的精華影片 |
+
+## 檢查工作資料夾狀態
+
+如果你不確定目前 `work/video1` 裡的檔案是不是同一輪 pipeline 產生的，可以跑：
+
+```bash
+uv run python auto_highlight.py doctor work/video1
+```
+
+它會檢查：
+
+- 來源影片是否還是同一個檔案
+- 必要 artifact 是否存在
+- `review_report.html`、字幕、成品影片是否比上游檔案舊
+- `edit_plan.json` 的時間範圍是否有效、有沒有重疊
+
+結果也會寫到：
+
+```text
+work/video1/doctor_report.json
+```
 
 ## Codex CLI 審稿模式
 

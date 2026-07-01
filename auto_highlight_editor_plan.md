@@ -468,18 +468,33 @@ Rules:
 - Do not re-transcribe or analyze the whole video unless explicitly asked.
 ```
 
+## Current Implementation Status
+
+Implemented as of 2026-07-01:
+
+- one-command and step-by-step CLI pipeline in `auto_highlight.py`
+- resumable artifacts under `work/<video-name>/`
+- transcript-based candidate generation with fallback speech clusters
+- optional visual analysis, OCR, thumbnails, visual subclips, and project focus inference
+- heuristic and optional Ollama text scoring
+- `content-first` selection mode and auto render quality selection
+- Scheme C confidence gate, Codex review packet, and `apply-review`
+- highlight style profiles via `--profile` / `--profile-file`
+- `review_report.json`, `review_report.md`, `review_report.html`, and contact sheets
+- `subtitles` export for SRT/VTT aligned to the final highlight timeline
+- `doctor` artifact freshness and validity checks
+
 ## Future V2 Improvements
 
 After MVP works:
 
 - add audio RMS and volume spike detection
 - refine cut points using nearby silence
-- add subtitle generation
 - add better Qwen rubric scoring
-- add a report HTML for manual review
 - support `--keep seg_001,seg_003`
 - support `--reject seg_010`
-- support `--style funny|travel|educational|viral`
+- support `--burn-subtitles` for rendered subtitle video output
+- support finer profile tuning beyond the current `default|travel|family|teaching|funny`
 
 ## Future V3 Improvements
 
@@ -490,7 +505,7 @@ Add visual metadata without becoming expensive:
 - use PySceneDetect for scene boundaries
 - optionally use OCR for signs, shops, landmarks, menus
 - optionally add CLIP/SigLIP visual tags
-- generate `report.html` with thumbnails, transcript, scores, and selected status
+- improve `review_report.html` with inline clip preview controls
 
 ## One-Command Target Behavior
 
@@ -510,8 +525,12 @@ Expected outputs:
 work/video1/transcript.json
 work/video1/candidates.json
 work/video1/scored_segments.json
+work/video1/highlight_profile.json
 work/video1/project.summary.json
 work/video1/edit_plan.json
+work/video1/review_report.html
+work/video1/subtitles.srt
+work/video1/subtitles.vtt
 work/video1/output/highlight.mp4
 ```
 

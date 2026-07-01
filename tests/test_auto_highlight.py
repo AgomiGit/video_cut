@@ -1,4 +1,5 @@
 import argparse
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -1415,6 +1416,88 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual(args.work_dir, "work/sample_video")
         self.assertEqual(args.func, ah.command_report)
+
+    def test_profile_keywords_are_used_for_candidate_generation(self):
+        transcript = {
+            "duration_sec": 40,
+            "segments": [
+                {"start": 10, "end": 13, "text": "這個展覽入口很漂亮"},
+                {"start": 25, "end": 27, "text": "普通對話"},
+            ],
+        }
+        profile = ah.load_profile("travel")
+
+        candidates = ah.generate_candidates_from_transcript(transcript, profile=profile)
+
+        self.assertTrue(candidates)
+        self.assertIn("入口", candidates[0]["signals"]["profile_keywords"])
+
+    def test_profile_scoring_adds_auditable_boost(self):
+        candidate = {
+            "id": "seg_001",
+            "final_score": 4.0,
+            "tags": ["視覺地點"],
+            "heuristic_scores": {"place_score": 6.0, "visual_event_score": 2.0, "focus_score": 3.0},
+            "signals": {"profile_keywords": ["入口"], "visual_quality": {"brightness": 0.52, "contrast": 0.2, "sharpness": 0.08}},
+        }
+
+        scored = ah.apply_profile_scoring([candidate], ah.load_profile("travel"))
+
+        self.assertGreater(scored[0]["final_score"], 4.0)
+        self.assertEqual(scored[0]["profile_adjusted_from"], 4.0)
+        self.assertEqual(scored[0]["profile_name"], "travel")
+
+    def test_subtitle_cues_map_source_times_to_output_timeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out_dir = Path(directory)
+            ah.write_json(
+                out_dir / "edit_plan.json",
+                {
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "source_start": 10, "source_end": 20},
+                        {"segment_id": "seg_002", "source_start": 40, "source_end": 45},
+                    ]
+                },
+            )
+            ah.write_json(
+                out_dir / "transcript.json",
+                {
+                    "segments": [
+                        {"start": 12, "end": 14, "text": "第一段"},
+                        {"start": 41, "end": 42, "text": "第二段"},
+                    ]
+                },
+            )
+
+            cues = ah.subtitle_cues_for_plan(out_dir)
+
+        self.assertEqual(cues[0]["start"], 2.0)
+        self.assertEqual(cues[0]["end"], 4.0)
+        self.assertEqual(cues[1]["start"], 11.0)
+        self.assertEqual(cues[1]["end"], 12.0)
+
+    def test_doctor_warns_on_stale_html_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out_dir = Path(directory)
+            source_video = out_dir / "source.mp4"
+            source_video.write_bytes(b"video")
+            ah.write_json(out_dir / "source.json", {"source_video": str(source_video), "duration_sec": 20, "fingerprint": ah.source_fingerprint(source_video)})
+            ah.write_json(out_dir / "transcript.json", {"segments": []})
+            ah.write_json(out_dir / "candidates.json", [])
+            ah.write_json(out_dir / "scored_segments.json", [])
+            ah.write_json(out_dir / "edit_plan.json", {"selected_segments": []})
+            report_path = out_dir / "review_report.json"
+            html_path = out_dir / "review_report.html"
+            report_path.write_text("{}", encoding="utf-8")
+            html_path.write_text("<html></html>", encoding="utf-8")
+            os.utime(html_path, (1000, 1000))
+            os.utime(report_path, (2000, 2000))
+
+            report = ah.doctor_check(out_dir)
+
+        stale_checks = [check for check in report["checks"] if check["name"] == "review_report.html"]
+        self.assertTrue(stale_checks)
+        self.assertEqual(stale_checks[0]["status"], "warn")
 
     def test_render_defaults_compress_to_phone_resolution(self):
         parser = ah.build_parser()
