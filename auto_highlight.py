@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import base64
 from collections import Counter
+import html
 import json
 import re
 import shutil
@@ -14,7 +14,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib import error, request
 
 
 KEYWORDS = [
@@ -112,6 +111,12 @@ DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
+PROFILE_ARTIFACT = "highlight_profile.json"
+AUTO_RENDER_PROFILES = {
+    "1080p": {"output_size": "1920x1080", "video_bitrate": "6000k"},
+    "1440p": {"output_size": "2560x1440", "video_bitrate": "10000k"},
+    "4k": {"output_size": "3840x2160", "video_bitrate": "16565k"},
+}
 DEFAULT_TARGET_RETENTION_RATIO = 0.30
 MAX_SELECTED_SEGMENTS = 10
 TARGET_SEGMENT_SECONDS = 24.0
@@ -120,12 +125,15 @@ MIN_PRE_TARGET_SCORE_RATIO = 0.5
 MIN_HIGHLIGHT_SCORE = 4.5
 HARD_DURATION_EXTRA_SEC = 30.0
 HARD_DURATION_MULTIPLIER = 1.5
+CONTENT_FIRST_SCORE_RATIO = 0.62
+CONTENT_FIRST_MIN_SCORE = 4.0
 CONTACT_SHEET_LABELS = {
     "selected": "Selected",
     "near_miss": "Near Misses",
 }
 GENERATED_ARTIFACT_FILES = [
     "audio.wav",
+    "analysis_video.mp4",
     "transcript.json",
     "candidates.json",
     "visual_segments.json",
@@ -133,9 +141,19 @@ GENERATED_ARTIFACT_FILES = [
     "project_focus.json",
     "project.summary.json",
     "edit_plan.json",
+    "plan_confidence.json",
+    "gpt_review_packet.json",
+    "codex_review_result.json",
+    "codex_review_apply_result.json",
+    "edit_plan.before_codex_review.json",
+    "edit_plan.gpt_reviewed.json",
     "review_report.json",
     "review_report.md",
     "ffmpeg_concat.txt",
+    "review_report.html",
+    "subtitles.srt",
+    "subtitles.vtt",
+    "subtitles.json",
 ]
 GENERATED_ARTIFACT_DIRS = ["clips", "thumbnails", "output"]
 CONTACT_SHEET_FONT = {
@@ -150,6 +168,60 @@ CONTACT_SHEET_FONT = {
     "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
     "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
     "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+}
+
+BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
+    "default": {
+        "version": "highlight_profile_v1",
+        "name": "default",
+        "description": "General highlight edit.",
+        "keywords": [],
+        "emotion_words": [],
+        "place_words": [],
+        "score_boosts": {},
+        "tag_boosts": {},
+    },
+    "travel": {
+        "version": "highlight_profile_v1",
+        "name": "travel",
+        "description": "Travel, venue, landmark, outdoor, food, and route highlights.",
+        "keywords": ["入口", "出口", "風景", "漂亮", "好美", "到了", "這家", "店家", "招牌", "排隊"],
+        "emotion_words": ["好美", "漂亮", "驚喜"],
+        "place_words": ["入口", "出口", "風景", "地標", "店家", "招牌", "公園", "市場", "展覽", "博物館"],
+        "score_boosts": {"place_score": 0.35, "visual_event_score": 0.25, "focus_score": 0.25, "quality": 0.15},
+        "tag_boosts": {"視覺地點": 0.5, "主體重點": 0.4},
+        "recommended_selection_mode": "content-first",
+    },
+    "family": {
+        "version": "highlight_profile_v1",
+        "name": "family",
+        "description": "Family, kids, pets, reactions, and close interaction.",
+        "keywords": ["寶貝", "可愛", "小朋友", "過來", "看這裡", "抱抱", "親一下", "笑一個"],
+        "emotion_words": ["可愛", "開心", "哈哈", "笑", "哇"],
+        "place_words": [],
+        "score_boosts": {"emotion_score": 0.4, "interaction_score": 0.35, "visual_event_score": 0.25},
+        "tag_boosts": {"反應": 0.5, "情緒": 0.4, "視覺亮點": 0.35},
+    },
+    "teaching": {
+        "version": "highlight_profile_v1",
+        "name": "teaching",
+        "description": "Instructional, demo, explanation, and conclusion highlights.",
+        "keywords": ["重點", "所以", "記得", "你會看到", "示範", "步驟", "總結", "結論", "原因", "方法"],
+        "emotion_words": [],
+        "place_words": [],
+        "score_boosts": {"keyword_score": 0.45, "speech_density_score": 0.25, "interaction_score": 0.15},
+        "tag_boosts": {"對話": 0.25},
+    },
+    "funny": {
+        "version": "highlight_profile_v1",
+        "name": "funny",
+        "description": "Short, punchy, funny, surprising, or reaction-heavy moments.",
+        "keywords": ["笑死", "太扯", "真的假的", "不是吧", "等一下", "尷尬", "糟糕", "完蛋", "好好笑"],
+        "emotion_words": ["笑死", "好好笑", "哈哈", "太扯", "尷尬"],
+        "place_words": [],
+        "score_boosts": {"emotion_score": 0.5, "keyword_score": 0.3, "interaction_score": 0.25},
+        "tag_boosts": {"反應": 0.5, "情緒": 0.5},
+    },
 }
 
 
@@ -174,6 +246,7 @@ class RenderSettings:
     audio_bitrate: str
     video_bitrate: str = ""
     fade_duration: float = DEFAULT_FADE_DURATION
+    quality_mode: str = "manual"
 
 
 def log(message: str) -> None:
@@ -190,6 +263,61 @@ def write_json(path: Path, data: Any) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+
+def profile_path(out_dir: Path) -> Path:
+    return out_dir / PROFILE_ARTIFACT
+
+
+def normalize_profile(data: dict[str, Any], name: str = "") -> dict[str, Any]:
+    profile = {
+        **BUILTIN_PROFILES["default"],
+        **data,
+    }
+    profile["version"] = "highlight_profile_v1"
+    profile["name"] = string_value(profile.get("name"), name or "custom")
+    for key in ("keywords", "emotion_words", "place_words"):
+        profile[key] = string_list_value(profile.get(key))
+    for key in ("score_boosts", "tag_boosts"):
+        value = profile.get(key)
+        profile[key] = value if isinstance(value, dict) else {}
+    if profile.get("recommended_selection_mode") not in (None, "", "duration", "content-first"):
+        profile.pop("recommended_selection_mode", None)
+    return profile
+
+
+def load_profile(profile_name: str = "default", profile_file: str = "") -> dict[str, Any]:
+    if profile_file:
+        path = Path(profile_file).expanduser()
+        if not path.exists():
+            raise SystemExit(f"Profile file not found: {path}")
+        data = read_json(path)
+        if not isinstance(data, dict):
+            raise SystemExit("Profile file must contain a JSON object")
+        return normalize_profile(data, path.stem)
+    key = profile_name or "default"
+    if key not in BUILTIN_PROFILES:
+        names = ", ".join(sorted(BUILTIN_PROFILES))
+        raise SystemExit(f"Unknown profile: {key}. Available profiles: {names}")
+    return normalize_profile(BUILTIN_PROFILES[key], key)
+
+
+def load_work_profile(out_dir: Path) -> dict[str, Any]:
+    path = profile_path(out_dir)
+    if not path.exists():
+        return load_profile("default")
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return load_profile("default")
+    return normalize_profile(data, string_value(data.get("name"), "custom"))
+
+
+def write_work_profile(out_dir: Path, profile: dict[str, Any]) -> None:
+    write_json(profile_path(out_dir), normalize_profile(profile, string_value(profile.get("name"), "custom")))
+
+
+def profile_terms(profile: dict[str, Any], key: str) -> list[str]:
+    return string_list_value(profile.get(key))
 
 
 def source_fingerprint(source_video: Path) -> dict[str, Any]:
@@ -377,6 +505,107 @@ def render_encoding_args(settings: RenderSettings, clip_duration: float = 0.0) -
     return args
 
 
+def selected_render_candidates(plan: dict[str, Any], scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_by_id = {item.get("id"): item for item in scored}
+    return [scored_by_id[segment.get("segment_id")] for segment in plan.get("selected_segments", []) if segment.get("segment_id") in scored_by_id]
+
+
+def render_quality_text(candidate: dict[str, Any]) -> str:
+    signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+    summary = signals.get("vision", {}).get("summary", {}) if isinstance(signals.get("vision"), dict) else {}
+    return " ".join(
+        [
+            str(summary.get("description", "")),
+            str(summary.get("setting", "")),
+            " ".join(listify(summary.get("settings"))),
+            " ".join(listify(summary.get("visual_hooks"))),
+            " ".join(listify(summary.get("subjects"))),
+            " ".join(candidate.get("tags", []) if isinstance(candidate.get("tags"), list) else []),
+        ]
+    ).lower()
+
+
+def render_quality_metrics(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    qualities = []
+    outdoor_terms = ("outdoor", "outside", "street", "river", "lake", "mountain", "hill", "sky", "rural", "landscape", "forest", "market", "戶外", "街", "湖", "山", "河")
+    indoor_terms = ("indoor", "inside", "museum", "gallery", "hallway", "kitchen", "corridor", "tunnel", "room", "展廳", "室內", "博物館", "廚房", "走廊")
+    outdoor_count = 0
+    indoor_count = 0
+    for candidate in selected:
+        signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+        quality = signals.get("visual_quality", {}) if isinstance(signals.get("visual_quality"), dict) else {}
+        if quality:
+            qualities.append(quality)
+        text = render_quality_text(candidate)
+        if any(term in text for term in outdoor_terms):
+            outdoor_count += 1
+        if any(term in text for term in indoor_terms):
+            indoor_count += 1
+
+    count = len(selected)
+    quality_count = len(qualities)
+    avg_brightness = sum(number_value(item.get("brightness"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    avg_contrast = sum(number_value(item.get("contrast"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    avg_sharpness = sum(number_value(item.get("sharpness"), 0.0) for item in qualities) / quality_count if quality_count else 0.0
+    weak_count = sum(
+        1
+        for item in qualities
+        if number_value(item.get("brightness"), 0.0) < 0.34 or number_value(item.get("sharpness"), 0.0) < 0.05
+    )
+    return {
+        "selected_count": count,
+        "quality_count": quality_count,
+        "avg_brightness": round(avg_brightness, 3),
+        "avg_contrast": round(avg_contrast, 3),
+        "avg_sharpness": round(avg_sharpness, 3),
+        "weak_quality_ratio": round(weak_count / quality_count, 3) if quality_count else 1.0,
+        "outdoor_ratio": round(outdoor_count / count, 3) if count else 0.0,
+        "indoor_ratio": round(indoor_count / count, 3) if count else 0.0,
+    }
+
+
+def choose_auto_render_profile(plan: dict[str, Any], scored: list[dict[str, Any]]) -> dict[str, Any]:
+    selected = selected_render_candidates(plan, scored)
+    metrics = render_quality_metrics(selected)
+    if metrics["quality_count"] == 0:
+        profile = "1080p"
+        reason = "no visual quality metadata is available"
+    elif metrics["weak_quality_ratio"] >= 0.55 or metrics["avg_sharpness"] < 0.05 or metrics["avg_brightness"] < 0.32:
+        profile = "1080p"
+        reason = "selected clips are mostly low-light, soft, or grainy"
+    elif metrics["outdoor_ratio"] >= 0.6 and metrics["weak_quality_ratio"] <= 0.25 and metrics["avg_brightness"] >= 0.42 and metrics["avg_sharpness"] >= 0.06:
+        profile = "4k"
+        reason = "selected clips are mostly bright outdoor detail shots"
+    else:
+        profile = "1440p"
+        reason = "selected clips are mixed quality"
+    return {"profile": profile, "reason": reason, "metrics": metrics, **AUTO_RENDER_PROFILES[profile]}
+
+
+def resolve_render_settings(out_dir: Path, plan: dict[str, Any], settings: RenderSettings) -> RenderSettings:
+    if settings.quality_mode != "auto":
+        return settings
+    scored_path = out_dir / "scored_segments.json"
+    scored = read_json(scored_path) if scored_path.exists() else []
+    profile = choose_auto_render_profile(plan, scored)
+    video_bitrate = settings.video_bitrate or str(profile["video_bitrate"])
+    resolved = RenderSettings(
+        output_size=str(profile["output_size"]),
+        crf=settings.crf,
+        preset=settings.preset,
+        audio_bitrate=settings.audio_bitrate,
+        video_bitrate=video_bitrate,
+        fade_duration=settings.fade_duration,
+        quality_mode=settings.quality_mode,
+    )
+    log(
+        "Auto render quality: "
+        f"{profile['profile']} ({profile['output_size']}, {video_bitrate}); "
+        f"{profile['reason']}; metrics={profile['metrics']}"
+    )
+    return resolved
+
+
 def init_work_dir(out_dir: Path, source_video: Path, force: bool = False) -> None:
     if out_dir.exists() and any(out_dir.iterdir()):
         log(f"Using existing work directory: {out_dir}")
@@ -494,6 +723,7 @@ def candidate_from_window(
     end: float,
     segments: list[dict[str, Any]],
     duration: float,
+    profile: Optional[dict[str, Any]] = None,
 ) -> Optional[Candidate]:
     start, end = clamp_segment(start, end, duration)
     if end - start < 8:
@@ -501,9 +731,10 @@ def candidate_from_window(
     text = transcript_text_between(segments, start, end)
     if not text:
         return None
-    keywords = text_hits(text, KEYWORDS)
-    emotion_words = text_hits(text, EMOTION_WORDS)
-    place_words = text_hits(text, PLACE_WORDS)
+    profile = profile or {}
+    keywords = text_hits(text, KEYWORDS + profile_terms(profile, "keywords"))
+    emotion_words = text_hits(text, EMOTION_WORDS + profile_terms(profile, "emotion_words"))
+    place_words = text_hits(text, PLACE_WORDS + profile_terms(profile, "place_words"))
     utterances = [seg for seg in segments if seg["end"] > start and seg["start"] < end]
     speech_seconds = sum(max(0.0, min(end, seg["end"]) - max(start, seg["start"])) for seg in utterances)
     density = min(1.0, speech_seconds / max(1.0, end - start))
@@ -515,6 +746,9 @@ def candidate_from_window(
         "utterance_count": len(utterances),
         "question_exclamation_count": sum(text.count(ch) for ch in ("?", "？", "!", "！")),
     }
+    profile_hits = text_hits(text, profile_terms(profile, "keywords"))
+    if profile_hits:
+        signals["profile_keywords"] = profile_hits
     return Candidate(candidate_id, round(start, 3), round(end, 3), text, signals)
 
 
@@ -540,6 +774,7 @@ def merge_two_candidates(left: Candidate, right: Candidate) -> Candidate:
         "keywords": sorted(set(left.signals.get("keywords", []) + right.signals.get("keywords", []))),
         "emotion_words": sorted(set(left.signals.get("emotion_words", []) + right.signals.get("emotion_words", []))),
         "place_words": sorted(set(left.signals.get("place_words", []) + right.signals.get("place_words", []))),
+        "profile_keywords": sorted(set(left.signals.get("profile_keywords", []) + right.signals.get("profile_keywords", []))),
         "speech_density": round(max(left.signals.get("speech_density", 0), right.signals.get("speech_density", 0)), 3),
         "utterance_count": left.signals.get("utterance_count", 0) + right.signals.get("utterance_count", 0),
         "question_exclamation_count": left.signals.get("question_exclamation_count", 0)
@@ -589,6 +824,7 @@ def split_long_candidate(
     duration: float,
     target_duration: float = 24.0,
     step: float = 16.0,
+    profile: Optional[dict[str, Any]] = None,
 ) -> list[Candidate]:
     if candidate.duration < 32:
         return []
@@ -597,9 +833,9 @@ def split_long_candidate(
     for utterance in utterances:
         text = utterance["text"]
         score = (
-            len(text_hits(text, KEYWORDS)) * 2.5
-            + len(text_hits(text, EMOTION_WORDS)) * 1.5
-            + len(text_hits(text, PLACE_WORDS)) * 0.8
+            len(text_hits(text, KEYWORDS + profile_terms(profile or {}, "keywords"))) * 2.5
+            + len(text_hits(text, EMOTION_WORDS + profile_terms(profile or {}, "emotion_words"))) * 1.5
+            + len(text_hits(text, PLACE_WORDS + profile_terms(profile or {}, "place_words"))) * 0.8
             + sum(text.count(ch) for ch in ("?", "？", "!", "！")) * 0.8
             + 0.4
         )
@@ -630,7 +866,7 @@ def split_long_candidate(
 
     splits: list[Candidate] = []
     for score, start, end, reason in ordered_windows:
-        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", start, end, segments, duration)
+        split = candidate_from_window(f"{candidate.id}_part_{len(splits):02d}", start, end, segments, duration, profile)
         if split and split.duration >= 12:
             signals = {
                 **split.signals,
@@ -643,22 +879,24 @@ def split_long_candidate(
     return splits
 
 
-def expand_with_subclips(candidates: list[Candidate], segments: list[dict[str, Any]], duration: float) -> list[Candidate]:
+def expand_with_subclips(candidates: list[Candidate], segments: list[dict[str, Any]], duration: float, profile: Optional[dict[str, Any]] = None) -> list[Candidate]:
     expanded: list[Candidate] = []
     for candidate in candidates:
         expanded.append(candidate)
-        expanded.extend(split_long_candidate(candidate, segments, duration))
+        expanded.extend(split_long_candidate(candidate, segments, duration, profile=profile))
     return expanded
 
 
-def generate_candidates_from_transcript(transcript: dict[str, Any], source_duration: Optional[float] = None) -> list[dict[str, Any]]:
+def generate_candidates_from_transcript(transcript: dict[str, Any], source_duration: Optional[float] = None, profile: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     segments = transcript_segments(transcript)
     duration = source_duration or float(transcript.get("duration_sec") or (segments[-1]["end"] if segments else 0.0))
     raw: list[Candidate] = []
+    profile = profile or {}
+    keyword_terms = KEYWORDS + profile_terms(profile, "keywords")
 
     for seg in segments:
-        if text_hits(seg["text"], KEYWORDS):
-            candidate = candidate_from_window(f"raw_{len(raw):04d}", seg["start"] - 8, seg["end"] + 20, segments, duration)
+        if text_hits(seg["text"], keyword_terms):
+            candidate = candidate_from_window(f"raw_{len(raw):04d}", seg["start"] - 8, seg["end"] + 20, segments, duration, profile)
             if candidate:
                 raw.append(candidate)
 
@@ -666,20 +904,20 @@ def generate_candidates_from_transcript(transcript: dict[str, Any], source_durat
     step = 10.0
     cursor = 0.0
     while cursor < duration:
-        candidate = candidate_from_window(f"raw_{len(raw):04d}", cursor, min(duration, cursor + window_size), segments, duration)
+        candidate = candidate_from_window(f"raw_{len(raw):04d}", cursor, min(duration, cursor + window_size), segments, duration, profile)
         if candidate and quick_window_score(candidate) >= 2.5:
             raw.append(candidate)
         cursor += step
 
-    raw.extend(generate_speech_cluster_candidates(segments, duration))
+    raw.extend(generate_speech_cluster_candidates(segments, duration, profile))
 
     merged = merge_candidates(raw)
     trimmed = [trim_candidate(candidate) for candidate in merged if candidate.duration >= 8]
-    expanded = expand_with_subclips(trimmed, segments, duration)
+    expanded = expand_with_subclips(trimmed, segments, duration, profile)
     return [candidate_to_dict(renumber_candidate(candidate, i)) for i, candidate in enumerate(expanded)]
 
 
-def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration: float) -> list[Candidate]:
+def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration: float, profile: Optional[dict[str, Any]] = None) -> list[Candidate]:
     clusters: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for segment in segments:
@@ -696,7 +934,7 @@ def generate_speech_cluster_candidates(segments: list[dict[str, Any]], duration:
     for cluster in clusters:
         start = cluster[0]["start"] - 5
         end = cluster[-1]["end"] + 7
-        candidate = candidate_from_window(f"raw_{len(candidates):04d}", start, end, segments, duration)
+        candidate = candidate_from_window(f"raw_{len(candidates):04d}", start, end, segments, duration, profile)
         if candidate:
             signals = {**candidate.signals, "fallback_reason": "speech_cluster"}
             candidates.append(Candidate(candidate.id, candidate.start, candidate.end, candidate.transcript, signals))
@@ -792,6 +1030,37 @@ def extract_quality_frame(source_video: Path, timestamp: float) -> bytes:
     )
 
 
+def ensure_analysis_video(source_video: Path, out_dir: Path, output_size: str = DEFAULT_OUTPUT_SIZE) -> Path:
+    analysis_video = out_dir / "analysis_video.mp4"
+    if analysis_video.exists():
+        return analysis_video
+    require_tool("ffmpeg")
+    log(f"Creating analysis proxy: {analysis_video}")
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            f"scale={output_size}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "30",
+            "-movflags",
+            "+faststart",
+            str(analysis_video),
+        ]
+    )
+    return analysis_video
+
+
 def extract_thumbnail(source_video: Path, timestamp: float, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     run_command(
@@ -826,82 +1095,6 @@ def ocr_thumbnail(image_path: Path, languages: str) -> str:
     except subprocess.CalledProcessError:
         return ""
     return " ".join(output.split())
-
-
-def parse_vision_response(text: str) -> dict[str, Any]:
-    try:
-        parsed = parse_first_json(text)
-    except Exception:
-        parsed = {"description": " ".join(text.split())}
-    return {
-        "description": str(parsed.get("description", "")).strip(),
-        "subjects": parsed.get("subjects", []) if isinstance(parsed.get("subjects", []), list) else [],
-        "setting": str(parsed.get("setting", "")).strip(),
-        "actions": parsed.get("actions", []) if isinstance(parsed.get("actions", []), list) else [],
-        "visual_hook": str(parsed.get("visual_hook", "")).strip(),
-        "quality_note": str(parsed.get("quality_note", "")).strip(),
-    }
-
-
-def vision_response_missing_image(parsed: dict[str, Any]) -> bool:
-    text = " ".join(
-        str(parsed.get(key, ""))
-        for key in ("description", "setting", "visual_hook", "quality_note")
-    ).lower()
-    patterns = [
-        "no image",
-        "no thumbnail",
-        "image missing",
-        "missing visual",
-        "unable to access",
-        "cannot access",
-        "cannot view",
-        "not provided",
-        "please upload",
-    ]
-    return any(pattern in text for pattern in patterns)
-
-
-def describe_thumbnail_with_ollama(image_path: Path, model: str, ollama_url: str, timeout_sec: float = 120.0) -> dict[str, Any]:
-    image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    prompt = (
-        "You are inspecting one actual video frame for highlight editing. "
-        "Use only visible evidence in the image. Describe broad visible categories such as people, water, rocks, animals, vehicles, food, signs, or buildings when present. "
-        "Use 'uncertain' only for ambiguous subjects. Do not infer sports, crowds, indoor venues, readable signs, or actions unless clearly visible. "
-        "Return JSON only with keys: description, subjects, setting, actions, visual_hook, quality_note. "
-        "Keep the description factual and concrete. Mention readable signs only if clearly visible. Do not invent text."
-    )
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
-        "stream": False,
-        "options": {"temperature": 0.1},
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        ollama_url.rstrip("/") + "/api/chat",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=timeout_sec) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        return {"error": str(exc), "description": "", "subjects": [], "setting": "", "actions": [], "visual_hook": "", "quality_note": ""}
-    content = raw.get("message", {}).get("content", "")
-    parsed = parse_vision_response(str(content))
-    if vision_response_missing_image(parsed):
-        return {
-            "error": "vision_model_did_not_receive_image",
-            "description": "",
-            "subjects": [],
-            "setting": "",
-            "actions": [],
-            "visual_hook": "",
-            "quality_note": parsed.get("quality_note", ""),
-        }
-    return parsed
 
 
 def summarize_vision_captions(captions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -986,8 +1179,6 @@ def analyze_candidate_visuals(
     candidate: dict[str, Any],
     thumbnail_count: int,
     ocr_languages: str,
-    vision_model: str,
-    ollama_url: str,
 ) -> dict[str, Any]:
     timestamps = sample_timestamps(candidate["start"], candidate["end"], thumbnail_count)
     thumbnails = []
@@ -1003,11 +1194,6 @@ def analyze_candidate_visuals(
         ocr_text = ocr_thumbnail(thumb_path, ocr_languages)
         if ocr_text:
             ocr_texts.append(ocr_text)
-        if vision_model:
-            caption = describe_thumbnail_with_ollama(thumb_path, vision_model, ollama_url)
-            caption["time"] = timestamp
-            caption["path"] = thumb_rel.as_posix()
-            vision_captions.append(caption)
 
     ocr_text = " ".join(dict.fromkeys(ocr_texts))
     ocr_hits = text_hits(ocr_text, OCR_PLACE_WORDS) if ocr_text else []
@@ -1024,8 +1210,8 @@ def analyze_candidate_visuals(
             "place_hits": ocr_hits,
         },
         "vision": {
-            "enabled": bool(vision_model),
-            "model": vision_model,
+            "enabled": False,
+            "model": "",
             "captions": vision_captions,
             "summary": summarize_vision_captions(vision_captions),
         },
@@ -1037,15 +1223,15 @@ def analyze_visuals(
     out_dir: Path,
     thumbnail_count: int = 3,
     ocr_languages: str = "chi_tra+eng",
-    vision_model: str = "",
-    ollama_url: str = "http://127.0.0.1:11434",
+    output_size: str = DEFAULT_OUTPUT_SIZE,
 ) -> list[dict[str, Any]]:
     require_tool("ffmpeg")
     source = read_json(out_dir / "source.json")
     candidates = read_json(out_dir / "candidates.json")
     source_video = Path(source["source_video"])
+    analysis_video = ensure_analysis_video(source_video, out_dir, output_size)
     visual_segments = [
-        analyze_candidate_visuals(source_video, out_dir, candidate, thumbnail_count, ocr_languages, vision_model, ollama_url)
+        analyze_candidate_visuals(analysis_video, out_dir, candidate, thumbnail_count, ocr_languages)
         for candidate in candidates
     ]
     write_json(out_dir / "visual_segments.json", visual_segments)
@@ -1607,58 +1793,104 @@ def final_score_from_scores(heuristic: dict[str, float], llm_scores: Optional[di
     )
 
 
-def score_with_ollama(candidate: dict[str, Any], model: str) -> dict[str, Any]:
-    prompt = {
-        "task": "Score this highlight candidate. Return JSON only with id, summary, title, tags, scores, is_standalone, avoid_reason.",
-        "rubric": {
-            "scores": "0 to 10 for hook, fun, interaction, place, emotion, clarity",
-            "avoid_reason": "Use 'none' if usable.",
-        },
-        "candidate": candidate,
-    }
-    output = run_capture(["ollama", "run", model, json.dumps(prompt, ensure_ascii=False)])
-    parsed = parse_first_json(output)
-    heuristic = heuristic_scores(candidate)
-    llm_scores = normalize_llm_scores(parsed.get("scores", {}))
-    tags = string_list_value(parsed.get("tags")) or infer_tags(candidate)
-    avoid_reason = normalize_avoid_reason(parsed.get("avoid_reason", "none"))
+def profile_score_adjustment(candidate: dict[str, Any], profile: dict[str, Any]) -> float:
+    if not profile or profile.get("name") == "default":
+        return 0.0
+    boosts = profile.get("score_boosts", {}) if isinstance(profile.get("score_boosts"), dict) else {}
+    tag_boosts = profile.get("tag_boosts", {}) if isinstance(profile.get("tag_boosts"), dict) else {}
+    heuristic = candidate.get("heuristic_scores", {}) if isinstance(candidate.get("heuristic_scores"), dict) else {}
+    adjustment = 0.0
+    for key, weight in boosts.items():
+        if key == "quality":
+            quality = candidate.get("signals", {}).get("visual_quality", {})
+            adjustment += visual_quality_score(quality if isinstance(quality, dict) else {}) * number_value(weight, 0.0)
+        else:
+            adjustment += number_value(heuristic.get(key), 0.0) * number_value(weight, 0.0)
+    tags = set(string_list_value(candidate.get("tags")))
+    for tag, boost in tag_boosts.items():
+        if str(tag) in tags:
+            adjustment += number_value(boost, 0.0)
+    profile_keyword_hits = candidate.get("signals", {}).get("profile_keywords", [])
+    adjustment += min(1.5, len(profile_keyword_hits) * 0.35)
+    return round(min(3.0, max(0.0, adjustment)), 3)
+
+
+def apply_profile_scoring(scored: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    if not profile or profile.get("name") == "default":
+        return scored
+    adjusted = []
+    for candidate in scored:
+        boost = profile_score_adjustment(candidate, profile)
+        if boost <= 0:
+            adjusted.append({**candidate, "profile_name": profile.get("name", "")})
+            continue
+        adjusted.append(
+            {
+                **candidate,
+                "profile_name": profile.get("name", ""),
+                "profile_score": boost,
+                "profile_adjusted_from": candidate.get("final_score"),
+                "final_score": round(number_value(candidate.get("final_score"), 0.0) + boost, 3),
+            }
+        )
+    return sorted(adjusted, key=lambda item: item["final_score"], reverse=True)
+
+
+def compact_candidate_for_llm(candidate: dict[str, Any]) -> dict[str, Any]:
+    signals = candidate.get("signals", {})
+    vision = signals.get("vision", {}) if isinstance(signals.get("vision"), dict) else {}
+    vision_summary = vision.get("summary", {}) if isinstance(vision.get("summary"), dict) else {}
+    captions = vision.get("captions", []) if isinstance(vision.get("captions"), list) else []
+    compact_captions = [
+        {
+            "time": caption.get("time"),
+            "description": caption.get("description", ""),
+            "subjects": caption.get("subjects", []),
+            "setting": caption.get("setting", ""),
+            "actions": caption.get("actions", []),
+            "visual_hook": caption.get("visual_hook", ""),
+        }
+        for caption in captions[:3]
+        if isinstance(caption, dict)
+    ]
     return {
-        **score_with_heuristic(candidate),
-        "summary": string_value(parsed.get("summary")) or summarize_transcript(candidate["transcript"]),
-        "title": string_value(parsed.get("title")) or summarize_transcript(candidate["transcript"], max_chars=18),
-        "tags": tags,
-        "scores": llm_scores,
-        "is_standalone": bool_value(parsed.get("is_standalone"), True),
-        "avoid_reason": avoid_reason,
-        "scoring_source": "ollama",
-        "final_score": round(final_score_from_scores(heuristic, llm_scores), 3),
+        "id": candidate.get("id"),
+        "start": candidate.get("start"),
+        "end": candidate.get("end"),
+        "duration_sec": candidate.get("duration_sec"),
+        "transcript": candidate.get("transcript", ""),
+        "audio_text_signals": {
+            "keywords": signals.get("keywords", []),
+            "emotion_words": signals.get("emotion_words", []),
+            "place_words": signals.get("place_words", []),
+            "speech_density": signals.get("speech_density"),
+            "utterance_count": signals.get("utterance_count"),
+        },
+        "visual": {
+            "description": vision_summary.get("description", ""),
+            "subjects": vision_summary.get("subjects", []),
+            "stable_subjects": vision_summary.get("stable_subjects", []),
+            "visual_hooks": vision_summary.get("visual_hooks", []),
+            "captions": compact_captions,
+        },
+        "focus": signals.get("focus", {}),
     }
 
 
 def parse_first_json(text: str) -> dict[str, Any]:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found")
-    data = json.loads(text[start : end + 1])
-    if not isinstance(data, dict):
-        raise ValueError("Expected JSON object")
-    return data
+    decoder = json.JSONDecoder(strict=False)
+    for match in re.finditer(r"\{", text):
+        try:
+            data, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise ValueError("No JSON object found")
 
 
-def score_candidates(candidates: list[dict[str, Any]], planner: str, model: str) -> list[dict[str, Any]]:
-    if planner == "ollama" and shutil.which("ollama") is None:
-        log("Ollama not found; falling back to heuristic scoring.")
-        planner = "heuristic"
-    scored = []
-    for candidate in candidates:
-        if planner == "ollama":
-            try:
-                scored.append(score_with_ollama(candidate, model))
-                continue
-            except Exception as exc:  # noqa: BLE001 - fallback should keep local pipeline usable.
-                log(f"Ollama scoring failed for {candidate['id']}; using heuristic. Reason: {exc}")
-        scored.append(score_with_heuristic(candidate))
+def score_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored = [score_with_heuristic(candidate) for candidate in candidates]
     return sorted(scored, key=lambda item: item["final_score"], reverse=True)
 
 
@@ -1797,6 +2029,66 @@ def select_segments(scored: list[dict[str, Any]], target_duration: float) -> lis
     return sorted(selected, key=lambda item: item["start"])
 
 
+def content_priority_score(candidate: dict[str, Any]) -> float:
+    scores = candidate.get("heuristic_scores", {}) if isinstance(candidate.get("heuristic_scores"), dict) else {}
+    signals = candidate.get("signals", {}) if isinstance(candidate.get("signals"), dict) else {}
+    visual_quality = signals.get("visual_quality", {}) if isinstance(signals.get("visual_quality"), dict) else {}
+    quality_score = visual_quality_score(visual_quality)
+    visual_score = max(
+        number_value(scores.get("visual_event_score"), 0.0),
+        number_value(scores.get("visual_interest_score"), 0.0),
+    )
+    score = (
+        visual_score * 1.7
+        + number_value(scores.get("place_score"), 0.0) * 1.2
+        + number_value(scores.get("focus_score"), 0.0) * 1.1
+        + quality_score * 0.9
+        + number_value(scores.get("emotion_score"), 0.0) * 0.45
+        + number_value(scores.get("keyword_score"), 0.0) * 0.35
+        + number_value(candidate.get("final_score"), 0.0) * 0.55
+    )
+    if number_value(candidate.get("duration_sec"), 0.0) > TARGET_SEGMENT_SECONDS * 1.75 and signals.get("candidate_type") != "subclip":
+        score *= 0.55
+    return round(score, 3)
+
+
+def select_segments_content_first(scored: list[dict[str, Any]], target_duration: float) -> list[dict[str, Any]]:
+    ranked_pool = sorted(
+        [
+            item
+            for item in scored
+            if item.get("is_standalone", True) and item.get("avoid_reason") in (None, "", "none")
+        ],
+        key=lambda item: (content_priority_score(item), number_value(item.get("final_score"), 0.0)),
+        reverse=True,
+    )
+    if not ranked_pool:
+        return []
+
+    top_score = content_priority_score(ranked_pool[0])
+    score_floor = max(CONTENT_FIRST_MIN_SCORE, top_score * CONTENT_FIRST_SCORE_RATIO)
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    selected: list[dict[str, Any]] = []
+    total = 0.0
+    for candidate in ranked_pool:
+        candidate_score = content_priority_score(candidate)
+        if candidate_score < score_floor:
+            break
+        if any(overlap_ratio(candidate, existing) > 0.2 for existing in selected):
+            continue
+        if any(abs(candidate["start"] - existing["start"]) < 4 for existing in selected):
+            continue
+        if any(too_visually_similar(candidate, existing) for existing in selected):
+            continue
+        if selected and total + candidate["duration_sec"] > hard_budget:
+            continue
+        selected.append(candidate)
+        total += candidate["duration_sec"]
+        if len(selected) >= MAX_SELECTED_SEGMENTS:
+            break
+    return sorted(selected, key=lambda item: item["start"])
+
+
 def selection_parameters(scored: list[dict[str, Any]], target_duration: float) -> dict[str, Any]:
     hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
     max_selected = max_segments_for_target(target_duration)
@@ -1900,16 +2192,28 @@ def padded_segment_bounds(selected: list[dict[str, Any]], source_duration: float
     return [(round(start, 3), round(end, 3)) for start, end in bounds]
 
 
+def padded_segment_bounds_by_id(selected: list[dict[str, Any]], source_duration: float, padding: float) -> dict[str, tuple[float, float]]:
+    ordered = sorted(selected, key=lambda item: (float(item["start"]), float(item["end"]), str(item.get("id", ""))))
+    ordered_bounds = padded_segment_bounds(ordered, source_duration, padding)
+    return {str(item["id"]): bounds for item, bounds in zip(ordered, ordered_bounds)}
+
+
 def build_edit_plan(
     out_dir: Path,
     target_duration: Optional[float],
     clip_padding: float = DEFAULT_CLIP_PADDING,
     retention_ratio: float = DEFAULT_TARGET_RETENTION_RATIO,
+    selection_mode: str = "duration",
 ) -> dict[str, Any]:
     source = read_json(out_dir / "source.json")
     scored = read_json(out_dir / "scored_segments.json")
+    profile = load_work_profile(out_dir)
     resolved_target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), target_duration, retention_ratio)
-    selected = select_segments(scored, resolved_target_duration)
+    selected = (
+        select_segments_content_first(scored, resolved_target_duration)
+        if selection_mode == "content-first"
+        else select_segments(scored, resolved_target_duration)
+    )
     padded_bounds = padded_segment_bounds(selected, float(source.get("duration_sec", 0.0)), max(0.0, clip_padding))
     segments = []
     for index, item in enumerate(selected):
@@ -1937,6 +2241,12 @@ def build_edit_plan(
         "target_duration_sec": resolved_target_duration,
         "target_duration_source": "explicit" if target_duration is not None else "source_retention_ratio",
         "target_retention_ratio": retention_ratio,
+        "selection_mode": selection_mode,
+        "highlight_profile": {
+            "name": profile.get("name", "default"),
+            "description": profile.get("description", ""),
+            "recommended_selection_mode": profile.get("recommended_selection_mode", ""),
+        },
         "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
         "selected_segments": segments,
     }
@@ -2011,6 +2321,9 @@ def selected_segment_details(plan: dict[str, Any], scored: list[dict[str, Any]])
                 "summary": scored_item.get("summary") or planned.get("reason", ""),
                 "reason": planned.get("reason", ""),
                 "final_score": planned.get("final_score", scored_item.get("final_score")),
+                "profile_score": scored_item.get("profile_score", 0.0),
+                "profile_adjusted_from": scored_item.get("profile_adjusted_from"),
+                "profile_name": scored_item.get("profile_name", ""),
                 "tags": scored_item.get("tags", []),
                 "scores": scored_item.get("scores", {}),
                 "heuristic_scores": scored_item.get("heuristic_scores", {}),
@@ -2080,6 +2393,553 @@ def build_review_report(out_dir: Path) -> dict[str, Any]:
     }
 
 
+def ensure_review_report(out_dir: Path) -> dict[str, Any]:
+    report_path = out_dir / "review_report.json"
+    dependencies = [out_dir / "edit_plan.json", out_dir / "scored_segments.json"]
+    if report_path.exists() and all(report_path.stat().st_mtime >= path.stat().st_mtime for path in dependencies if path.exists()):
+        return read_json(report_path)
+    return write_review_report(out_dir)
+
+
+def scoring_fallback_ratio(scored: list[dict[str, Any]]) -> float:
+    if not scored:
+        return 1.0
+    sources = [str(item.get("scoring_source", "")) for item in scored]
+    model_sources = {"codex"}
+    if not any(source in model_sources for source in sources):
+        return 0.0
+    fallback_count = sum(1 for source in sources if source not in model_sources)
+    return fallback_count / len(scored)
+
+
+def selected_scored_items(plan: dict[str, Any], scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_by_id = {item.get("id"): item for item in scored}
+    return [scored_by_id[segment.get("segment_id")] for segment in plan.get("selected_segments", []) if segment.get("segment_id") in scored_by_id]
+
+
+def top_score_spread(scored: list[dict[str, Any]], limit: int = 10) -> float:
+    top_scores = [float(item.get("final_score", 0.0)) for item in sorted(scored, key=lambda item: item.get("final_score", 0.0), reverse=True)[:limit]]
+    if len(top_scores) < 2:
+        return 0.0
+    return max(top_scores) - min(top_scores)
+
+
+def selected_near_miss_gap(report: dict[str, Any]) -> Optional[float]:
+    selected_scores = [float(item.get("final_score", 0.0)) for item in report.get("selected_segments", [])]
+    near_miss_scores = [float(item.get("final_score", 0.0)) for item in report.get("near_miss_segments", [])]
+    if not selected_scores or not near_miss_scores:
+        return None
+    return max(selected_scores) - max(near_miss_scores)
+
+
+def selected_visual_repetition(selected: list[dict[str, Any]]) -> float:
+    if len(selected) < 2:
+        return 0.0
+    similarities = []
+    for left_index, left in enumerate(selected):
+        for right in selected[left_index + 1 :]:
+            similarities.append(scene_similarity(left, right))
+    return max(similarities) if similarities else 0.0
+
+
+def role_confidence(plan: dict[str, Any], scored: list[dict[str, Any]], role: str) -> float:
+    scored_by_id = {item.get("id"): item for item in scored}
+    planned = next((segment for segment in plan.get("selected_segments", []) if segment.get("role") == role), None)
+    if not planned:
+        return 0.0
+    scored_item = scored_by_id.get(planned.get("segment_id"), {})
+    scores = scored_item.get("scores", {}) if isinstance(scored_item.get("scores"), dict) else {}
+    role_score = number_value(scores.get("hook" if role == "hook" else "clarity"), 0.0)
+    final_score = number_value(scored_item.get("final_score", planned.get("final_score", 0.0)), 0.0)
+    return max(role_score, final_score)
+
+
+def all_selected_clarity_below(selected: list[dict[str, Any]], threshold: float) -> bool:
+    if not selected:
+        return False
+    clarity_scores = [number_value(item.get("scores", {}).get("clarity"), 0.0) for item in selected]
+    return all(score < threshold for score in clarity_scores)
+
+
+def validate_edit_plan(plan: dict[str, Any], source_duration: Optional[float] = None) -> list[str]:
+    errors = []
+    selected = plan.get("selected_segments", [])
+    if not isinstance(selected, list):
+        return ["selected_segments_not_list"]
+    for segment in selected:
+        try:
+            start = float(segment.get("source_start"))
+            end = float(segment.get("source_end"))
+        except (TypeError, ValueError):
+            errors.append(f"invalid_bounds:{segment.get('segment_id', '')}")
+            continue
+        if start < 0 or end <= start:
+            errors.append(f"invalid_bounds:{segment.get('segment_id', '')}")
+        if source_duration is not None and end > source_duration:
+            errors.append(f"outside_source:{segment.get('segment_id', '')}")
+    for index, left in enumerate(selected):
+        for right in selected[index + 1 :]:
+            if max(0.0, min(float(left.get("source_end", 0.0)), float(right.get("source_end", 0.0))) - max(float(left.get("source_start", 0.0)), float(right.get("source_start", 0.0)))) > 0.5:
+                errors.append(f"overlapping_plan_segments:{left.get('segment_id', '')}:{right.get('segment_id', '')}")
+    return errors
+
+
+def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
+    plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    report = ensure_review_report(out_dir)
+    selected = selected_scored_items(plan, scored)
+    selected_count = len(plan.get("selected_segments", []))
+    content_first = plan.get("selection_mode") == "content-first"
+    target_duration = max(1.0, float(plan.get("target_duration_sec", 0.0) or 0.0))
+    selected_duration = float(plan.get("selected_duration_sec", 0.0) or 0.0)
+    duration_ratio = selected_duration / target_duration
+    fallback_ratio = scoring_fallback_ratio(scored)
+    score_spread = top_score_spread(scored)
+    near_miss_gap = selected_near_miss_gap(report)
+    repetition = selected_visual_repetition(selected)
+    hook_score = role_confidence(plan, scored, "hook")
+    ending_score = role_confidence(plan, scored, "ending")
+    source_duration = source_duration_for_plan(out_dir, plan)
+    plan_errors = validate_edit_plan(plan, source_duration if source_duration else None)
+
+    red_rules = []
+    if selected_count == 0:
+        red_rules.append({"rule": "selected_segments_zero", "detail": "No selected segments are available to render."})
+    if not content_first and duration_ratio < 0.45:
+        red_rules.append({"rule": "selected_duration_under_45_percent", "value": round(duration_ratio, 3)})
+    if fallback_ratio > 0.35:
+        red_rules.append({"rule": "fallback_scoring_ratio_over_35_percent", "value": round(fallback_ratio, 3)})
+    if not content_first and all_selected_clarity_below(selected, 6.0):
+        red_rules.append({"rule": "all_selected_clarity_under_6"})
+    for error_name in plan_errors:
+        red_rules.append({"rule": "invalid_edit_plan", "detail": error_name})
+
+    yellow_rules = []
+    if selected_count < 3:
+        yellow_rules.append({"rule": "selected_segments_under_3", "value": selected_count})
+    if not content_first and duration_ratio < 0.70:
+        yellow_rules.append({"rule": "selected_duration_under_70_percent", "value": round(duration_ratio, 3)})
+    if near_miss_gap is not None and near_miss_gap < 0.3:
+        yellow_rules.append({"rule": "near_miss_score_close_to_selected", "value": round(near_miss_gap, 3)})
+    if len(scored) >= 3 and score_spread < 0.6:
+        yellow_rules.append({"rule": "top_10_score_spread_under_0_6", "value": round(score_spread, 3)})
+    if fallback_ratio > 0.15:
+        yellow_rules.append({"rule": "fallback_scoring_ratio_over_15_percent", "value": round(fallback_ratio, 3)})
+    if repetition >= 0.82:
+        yellow_rules.append({"rule": "selected_visual_repetition_high", "value": round(repetition, 3)})
+    if hook_score < 6.5:
+        yellow_rules.append({"rule": "hook_confidence_weak", "value": round(hook_score, 3)})
+    if selected_count >= 2 and ending_score < 6.5:
+        yellow_rules.append({"rule": "ending_confidence_weak", "value": round(ending_score, 3)})
+
+    if red_rules:
+        status = "red"
+        recommended_action = "codex_rerank"
+    elif len(yellow_rules) >= 2:
+        status = "yellow"
+        recommended_action = "codex_review"
+    else:
+        status = "green"
+        recommended_action = "render"
+
+    confidence_score = max(0.0, min(1.0, 1.0 - len(red_rules) * 0.35 - len(yellow_rules) * 0.12))
+    result = {
+        "version": "plan_confidence_v1",
+        "status": status,
+        "confidence_score": round(confidence_score, 3),
+        "recommended_action": recommended_action,
+        "triggered_rules": red_rules + yellow_rules,
+        "red_rules": red_rules,
+        "yellow_rules": yellow_rules,
+        "metrics": {
+            "selected_count": selected_count,
+            "target_duration_sec": round(target_duration, 3),
+            "selected_duration_sec": round(selected_duration, 3),
+            "duration_ratio": round(duration_ratio, 3),
+            "fallback_scoring_ratio": round(fallback_ratio, 3),
+            "top_10_score_spread": round(score_spread, 3),
+            "selected_near_miss_score_gap": None if near_miss_gap is None else round(near_miss_gap, 3),
+            "selected_visual_repetition": round(repetition, 3),
+            "hook_confidence": round(hook_score, 3),
+            "ending_confidence": round(ending_score, 3),
+        },
+    }
+    write_json(out_dir / "plan_confidence.json", result)
+    return result
+
+
+def candidate_review_entry(candidate: dict[str, Any], skip_reason: str = "") -> dict[str, Any]:
+    signals = candidate.get("signals", {})
+    vision_summary = signals.get("vision", {}).get("summary", {}) if isinstance(signals.get("vision"), dict) else {}
+    return {
+        "segment_id": candidate.get("id", ""),
+        "time": f"{format_time(float(candidate.get('start', 0.0)))}-{format_time(float(candidate.get('end', 0.0)))}",
+        "start": candidate.get("start"),
+        "end": candidate.get("end"),
+        "duration_sec": candidate.get("duration_sec"),
+        "title": candidate.get("title", candidate.get("id", "")),
+        "summary": candidate.get("summary", ""),
+        "final_score": candidate.get("final_score"),
+        "scores": candidate.get("scores", {}),
+        "tags": candidate.get("tags", []),
+        "is_standalone": candidate.get("is_standalone", True),
+        "avoid_reason": candidate.get("avoid_reason", "none"),
+        "scoring_source": candidate.get("scoring_source", ""),
+        "skip_reason": skip_reason,
+        "transcript_excerpt": summarize_transcript(candidate.get("transcript", ""), max_chars=140),
+        "visual_description": summarize_transcript(vision_summary.get("description", ""), max_chars=160),
+        "visual_subjects": vision_summary.get("stable_subjects") or vision_summary.get("normalized_subjects") or vision_summary.get("subjects", []),
+        "thumbnails": signals.get("thumbnails", []),
+        "focus": signals.get("focus", {}),
+    }
+
+
+def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] = None, top_candidate_limit: int = 20) -> dict[str, Any]:
+    plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    report = ensure_review_report(out_dir)
+    confidence = confidence or compute_plan_confidence(out_dir)
+    focus_path = out_dir / "project_focus.json"
+    project_focus = read_json(focus_path) if focus_path.exists() else {}
+    selected_ids = {segment.get("segment_id") for segment in plan.get("selected_segments", [])}
+    scored_by_id = {item.get("id"): item for item in scored}
+    selected = [
+        {
+            **segment,
+            "candidate": candidate_review_entry(scored_by_id.get(segment.get("segment_id"), {})),
+        }
+        for segment in plan.get("selected_segments", [])
+    ]
+    params = selection_parameters(scored, float(plan.get("target_duration_sec", 0.0) or 0.0))
+    selected_scored = [scored_by_id[segment_id] for segment_id in selected_ids if segment_id in scored_by_id]
+    near_misses = near_miss_segments(plan, scored, limit=10)
+    top_candidates = []
+    for candidate in sorted(scored, key=lambda item: item.get("final_score", 0.0), reverse=True)[:top_candidate_limit]:
+        skip_reason = "" if candidate.get("id") in selected_ids else skipped_reason(candidate, selected_scored, float(plan.get("target_duration_sec", 0.0) or 0.0), params)
+        top_candidates.append(candidate_review_entry(candidate, skip_reason))
+    packet = {
+        "version": "gpt_review_packet_v1",
+        "reviewer": "codex_cli",
+        "instructions": {
+            "green": "Render directly from edit_plan.json.",
+            "yellow": "Review current plan. Allowed decisions: approve, reorder selected segments, replace with near miss, remove weak segment.",
+            "red": "Rerank bounded candidates by writing selected_segment_ids from existing candidate IDs only.",
+            "subagents": "Use the main Codex agent (gpt-5.5) for complex editorial decisions; Codex may use gpt-5.4-mini subagents for simple bounded checks.",
+            "audit": "Write codex_review_result.json with the decision and reasons.",
+            "apply": "Run python3 auto_highlight.py apply-review <work-dir>; it validates the result, backs up edit_plan.json, and writes the reviewed plan.",
+            "do_not": "Do not edit edit_plan.json directly before apply-review.",
+        },
+        "confidence": confidence,
+        "project_focus": project_focus,
+        "target_duration_sec": plan.get("target_duration_sec"),
+        "selected_duration_sec": plan.get("selected_duration_sec"),
+        "current_plan": plan,
+        "selected_segments": selected,
+        "near_miss_segments": near_misses,
+        "top_candidates": top_candidates,
+        "review_report": {
+            "path": "review_report.md",
+            "contact_sheet": report.get("contact_sheet", "review_contact_sheet.jpg"),
+            "selected_count": report.get("selected_count", 0),
+        },
+    }
+    write_json(out_dir / "gpt_review_packet.json", packet)
+    return packet
+
+
+def format_review_rule(rule: dict[str, Any]) -> str:
+    detail = rule.get("detail", rule.get("value", ""))
+    suffix = f": {detail}" if detail != "" else ""
+    return f"- {rule.get('rule', 'unknown_rule')}{suffix}"
+
+
+def review_summary_segment_line(item: dict[str, Any], index: Optional[int] = None) -> str:
+    candidate = item.get("candidate", item)
+    segment_id = candidate.get("segment_id") or item.get("segment_id", "")
+    prefix = f"{index}. " if index is not None else "- "
+    title = candidate.get("title") or segment_id
+    score = candidate.get("final_score", "-")
+    time_text = candidate.get("time", "")
+    role = item.get("role", "")
+    role_text = f" {role}" if role else ""
+    line = f"{prefix}{segment_id}{role_text} {time_text} score={score} {title}".rstrip()
+    skip_reason = candidate.get("skip_reason") or item.get("skip_reason", "")
+    if skip_reason:
+        line += f" (skip: {skip_reason})"
+    return line
+
+
+def render_review_summary(out_dir: Path, confidence: dict[str, Any], packet: dict[str, Any], near_miss_limit: int = 5) -> str:
+    selected = packet.get("selected_segments", [])
+    near_misses = packet.get("near_miss_segments", [])[: max(0, near_miss_limit)]
+    report = packet.get("review_report", {})
+    status = confidence.get("status", "")
+    lines = [
+        "Review Summary",
+        f"Status: {status} (confidence={confidence.get('confidence_score')}, action={confidence.get('recommended_action')})",
+        f"Target: {packet.get('target_duration_sec')}s; selected: {packet.get('selected_duration_sec')}s; clips: {len(selected)}",
+        f"Packet: {out_dir / 'gpt_review_packet.json'}",
+        f"Report: {out_dir / str(report.get('path') or 'review_report.md')}",
+    ]
+    contact_sheet = report.get("contact_sheet")
+    if contact_sheet:
+        lines.append(f"Contact sheet: {out_dir / str(contact_sheet)}")
+
+    rules = confidence.get("triggered_rules", [])
+    lines.append("")
+    lines.append("Triggered Rules")
+    lines.extend([format_review_rule(rule) for rule in rules] or ["- none"])
+
+    lines.append("")
+    lines.append("Selected Segments")
+    if selected:
+        lines.extend(review_summary_segment_line(item, index + 1) for index, item in enumerate(selected))
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("Near Misses")
+    if near_misses:
+        lines.extend(review_summary_segment_line(item) for item in near_misses)
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("Next Step")
+    if status == "green":
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    elif status == "yellow":
+        lines.append(f"- Write {out_dir / 'codex_review_result.json'} with approve/revise.")
+        lines.append(f"- python3 auto_highlight.py apply-review {out_dir}")
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    else:
+        lines.append(f"- Write {out_dir / 'codex_review_result.json'} with rerank selected_segment_ids.")
+        lines.append(f"- python3 auto_highlight.py apply-review {out_dir}")
+        lines.append(f"- python3 auto_highlight.py render {out_dir}")
+    return "\n".join(lines)
+
+
+def source_duration_for_plan(out_dir: Path, plan: dict[str, Any]) -> float:
+    source_path = out_dir / "source.json"
+    if source_path.exists():
+        source = read_json(source_path)
+        return float(source.get("duration_sec", 0.0) or 0.0)
+    ends = [float(segment.get("source_end", 0.0) or 0.0) for segment in plan.get("selected_segments", [])]
+    return max(ends) if ends else 0.0
+
+
+def review_packet_allowed_ids(packet: dict[str, Any]) -> set[str]:
+    allowed: set[str] = set()
+    for key in ("selected_segments", "near_miss_segments", "top_candidates"):
+        for item in packet.get(key, []):
+            segment_id = item.get("segment_id") or item.get("candidate", {}).get("segment_id")
+            if segment_id:
+                allowed.add(str(segment_id))
+    return allowed
+
+
+def normalize_review_decision(value: Any) -> str:
+    decision = string_value(value, "").lower().replace("-", "_")
+    if decision in {"approve", "approved"}:
+        return "approve"
+    if decision in {"revise", "review", "edit", "modify"}:
+        return "revise"
+    if decision in {"rerank", "rebuild", "rescue"}:
+        return "rerank"
+    raise ValueError(f"Unsupported review decision: {value}")
+
+
+def review_result_selected_ids(result: dict[str, Any], current_ids: list[str], allowed_ids: set[str]) -> list[str]:
+    decision = normalize_review_decision(result.get("decision"))
+    if decision == "approve":
+        return current_ids
+    explicit_ids = result.get("selected_segment_ids")
+    if explicit_ids is not None:
+        selected_ids = [str(item).strip() for item in listify(explicit_ids) if str(item).strip()]
+        validate_review_segment_ids(selected_ids, allowed_ids)
+        return selected_ids
+    selected_ids = list(current_ids)
+    operations = result.get("operations", [])
+    if not isinstance(operations, list):
+        raise ValueError("operations must be a list")
+    if decision == "rerank" and not operations:
+        raise ValueError("rerank requires selected_segment_ids or operations")
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("operation must be an object")
+        op_name = string_value(operation.get("op")).lower().replace("-", "_")
+        if op_name == "replace":
+            remove_id = string_value(operation.get("remove") or operation.get("remove_segment_id"))
+            add_id = string_value(operation.get("add") or operation.get("add_segment_id"))
+            if remove_id not in selected_ids:
+                raise ValueError(f"replace remove id not selected: {remove_id}")
+            validate_review_segment_ids([add_id], allowed_ids)
+            selected_ids[selected_ids.index(remove_id)] = add_id
+        elif op_name == "remove":
+            segment_id = string_value(operation.get("segment_id") or operation.get("remove"))
+            if segment_id not in selected_ids:
+                raise ValueError(f"remove id not selected: {segment_id}")
+            selected_ids = [item for item in selected_ids if item != segment_id]
+        elif op_name == "reorder":
+            order = [str(item).strip() for item in listify(operation.get("segment_ids") or operation.get("order")) if str(item).strip()]
+            if set(order) != set(selected_ids) or len(order) != len(selected_ids):
+                raise ValueError("reorder must contain exactly the current selected segment ids")
+            selected_ids = order
+        else:
+            raise ValueError(f"Unsupported review operation: {op_name}")
+    validate_review_segment_ids(selected_ids, allowed_ids)
+    return selected_ids
+
+
+def validate_review_segment_ids(segment_ids: list[str], allowed_ids: set[str]) -> None:
+    if not segment_ids:
+        raise ValueError("review result selects no segments")
+    duplicates = [segment_id for segment_id, count in Counter(segment_ids).items() if count > 1]
+    if duplicates:
+        raise ValueError(f"duplicate selected segment ids: {', '.join(duplicates)}")
+    unknown = [segment_id for segment_id in segment_ids if segment_id not in allowed_ids]
+    if unknown:
+        raise ValueError(f"segment ids are outside review packet: {', '.join(unknown)}")
+
+
+def validate_selected_candidates(selected: list[dict[str, Any]], target_duration: float, source_duration: float) -> list[str]:
+    errors = []
+    for candidate in selected:
+        if candidate.get("avoid_reason") not in (None, "", "none"):
+            errors.append(f"avoid_reason:{candidate.get('id', '')}:{candidate.get('avoid_reason')}")
+        if not candidate.get("is_standalone", True):
+            errors.append(f"not_standalone:{candidate.get('id', '')}")
+        if float(candidate.get("start", 0.0)) < 0 or float(candidate.get("end", 0.0)) <= float(candidate.get("start", 0.0)):
+            errors.append(f"invalid_candidate_bounds:{candidate.get('id', '')}")
+        if source_duration and float(candidate.get("end", 0.0)) > source_duration:
+            errors.append(f"candidate_outside_source:{candidate.get('id', '')}")
+    for index, left in enumerate(selected):
+        for right in selected[index + 1 :]:
+            if overlap_ratio(left, right) > 0.2:
+                errors.append(f"candidate_overlap:{left.get('id', '')}:{right.get('id', '')}")
+    selected_duration = sum(float(item.get("duration_sec", 0.0)) + DEFAULT_CLIP_PADDING * 2 for item in selected)
+    hard_budget = max(target_duration * HARD_DURATION_MULTIPLIER, target_duration + HARD_DURATION_EXTRA_SEC)
+    if selected_duration > hard_budget + 1.0:
+        errors.append(f"selected_duration_over_hard_budget:{round(selected_duration, 3)}>{round(hard_budget, 3)}")
+    return errors
+
+
+def build_edit_plan_from_selected(
+    base_plan: dict[str, Any],
+    selected: list[dict[str, Any]],
+    source_duration: float,
+    clip_padding: float,
+) -> dict[str, Any]:
+    padding = max(0.0, clip_padding)
+    if source_duration:
+        padded_bounds = padded_segment_bounds_by_id(selected, source_duration, padding)
+    else:
+        padded_bounds = {
+            str(item["id"]): (round(max(0.0, float(item["start"]) - padding), 3), round(float(item["end"]) + padding, 3))
+            for item in selected
+        }
+    segments = []
+    for index, item in enumerate(selected):
+        role = "hook" if index == 0 else ("ending" if index == len(selected) - 1 else "highlight")
+        source_start, source_end = padded_bounds[str(item["id"])]
+        segments.append(
+            {
+                "segment_id": item["id"],
+                "role": role,
+                "source_start": source_start,
+                "source_end": source_end,
+                "duration_sec": round(source_end - source_start, 3),
+                "original_source_start": item["start"],
+                "original_source_end": item["end"],
+                "clip_padding_sec": clip_padding,
+                "title": item.get("title", item["id"]),
+                "reason": item.get("summary", ""),
+                "final_score": item.get("final_score"),
+            }
+        )
+    return {
+        **base_plan,
+        "version": "edit_plan_v1",
+        "selected_duration_sec": round(sum(item["duration_sec"] for item in segments), 3),
+        "selected_segments": segments,
+    }
+
+
+def apply_codex_review(out_dir: Path, review_result_path: Optional[Path] = None) -> dict[str, Any]:
+    review_result_path = review_result_path or (out_dir / "codex_review_result.json")
+    if not review_result_path.exists():
+        raise SystemExit(f"Review result not found: {review_result_path}")
+    result = read_json(review_result_path)
+    if not isinstance(result, dict):
+        raise SystemExit("codex_review_result.json must be a JSON object")
+    current_plan = read_json(out_dir / "edit_plan.json")
+    scored = read_json(out_dir / "scored_segments.json")
+    packet_path = out_dir / "gpt_review_packet.json"
+    if packet_path.exists():
+        packet = read_json(packet_path)
+    else:
+        packet = build_gpt_review_packet(out_dir)
+    allowed_ids = review_packet_allowed_ids(packet)
+    current_ids = [str(segment.get("segment_id")) for segment in current_plan.get("selected_segments", [])]
+    try:
+        selected_ids = review_result_selected_ids(result, current_ids, allowed_ids)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid review result: {exc}") from exc
+
+    if normalize_review_decision(result.get("decision")) == "approve" and selected_ids == current_ids:
+        applied = {
+            "version": "codex_review_apply_result_v1",
+            "decision": "approve",
+            "changed": False,
+            "selected_segment_ids": selected_ids,
+            "reason": string_value(result.get("reason")),
+        }
+        write_json(out_dir / "codex_review_apply_result.json", applied)
+        log("Review approved current edit_plan.json without changes.")
+        return applied
+
+    scored_by_id = {item.get("id"): item for item in scored}
+    selected = [scored_by_id[segment_id] for segment_id in selected_ids if segment_id in scored_by_id]
+    if len(selected) != len(selected_ids):
+        missing = [segment_id for segment_id in selected_ids if segment_id not in scored_by_id]
+        raise SystemExit(f"Selected segment ids missing from scored_segments.json: {', '.join(missing)}")
+    source_duration = source_duration_for_plan(out_dir, current_plan)
+    target_duration = float(current_plan.get("target_duration_sec", 0.0) or 0.0)
+    candidate_errors = validate_selected_candidates(selected, target_duration, source_duration)
+    if candidate_errors:
+        raise SystemExit("Invalid reviewed candidate selection: " + "; ".join(candidate_errors))
+    clip_padding = number_value(
+        current_plan.get("selected_segments", [{}])[0].get("clip_padding_sec") if current_plan.get("selected_segments") else None,
+        DEFAULT_CLIP_PADDING,
+    )
+    reviewed_plan = build_edit_plan_from_selected(current_plan, selected, source_duration, clip_padding)
+    plan_errors = validate_edit_plan(reviewed_plan, source_duration)
+    if plan_errors:
+        raise SystemExit("Reviewed edit_plan.json is invalid: " + "; ".join(plan_errors))
+
+    backup_path = out_dir / "edit_plan.before_codex_review.json"
+    shutil.copyfile(out_dir / "edit_plan.json", backup_path)
+    write_json(out_dir / "edit_plan.gpt_reviewed.json", reviewed_plan)
+    write_json(out_dir / "edit_plan.json", reviewed_plan)
+    write_review_report(out_dir)
+    confidence = compute_plan_confidence(out_dir)
+    build_gpt_review_packet(out_dir, confidence)
+    applied = {
+        "version": "codex_review_apply_result_v1",
+        "decision": normalize_review_decision(result.get("decision")),
+        "changed": True,
+        "selected_segment_ids": selected_ids,
+        "backup_path": str(backup_path),
+        "reviewed_plan_path": str(out_dir / "edit_plan.gpt_reviewed.json"),
+        "reason": string_value(result.get("reason")),
+        "post_apply_confidence": confidence,
+    }
+    write_json(out_dir / "codex_review_apply_result.json", applied)
+    log(f"Applied Codex review to {out_dir / 'edit_plan.json'}")
+    return applied
+
+
 def render_review_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Highlight Review Report",
@@ -2104,6 +2964,7 @@ def render_review_markdown(report: dict[str, Any]) -> str:
                 "",
                 f"- Role/time: {segment['role']} at {segment['time']} ({segment['duration_sec']}s)",
                 f"- Score/source: {segment.get('final_score', '-')} from {segment.get('scoring_source') or 'unknown'}",
+                f"- Profile boost: {segment.get('profile_score', 0)} from {segment.get('profile_name') or '-'}",
                 f"- Tags: {compact_list(segment.get('tags'))}",
                 f"- Reason: {segment.get('reason') or segment.get('summary') or '-'}",
                 f"- Transcript: {segment.get('transcript_excerpt') or '-'}",
@@ -2139,6 +3000,232 @@ def render_review_markdown(report: dict[str, Any]) -> str:
             )
     lines.append("")
     return "\n".join(lines)
+
+
+def html_text(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
+
+
+def html_image_grid(out_dir: Path, segment: dict[str, Any]) -> str:
+    paths = thumbnail_paths(segment)
+    if not paths:
+        return '<div class="muted">No thumbnails</div>'
+    images = []
+    for path in paths[:3]:
+        resolved = out_dir / path
+        src = html.escape(path)
+        if not resolved.exists():
+            images.append(f'<div class="thumb missing">{html_text(path)}</div>')
+        else:
+            images.append(f'<img class="thumb" src="{src}" alt="{html_text(segment.get("segment_id", ""))} thumbnail">')
+    return '<div class="thumbs">' + "".join(images) + "</div>"
+
+
+def render_segment_card(out_dir: Path, segment: dict[str, Any], kind: str) -> str:
+    score = html_text(segment.get("final_score", "-"))
+    tags = html_text(compact_list(segment.get("tags")))
+    skip = segment.get("skip_reason", "")
+    skip_html = f'<div class="pill warn">{html_text(skip)}</div>' if skip else ""
+    profile_score = number_value(segment.get("profile_score"), 0.0)
+    profile_html = ""
+    if profile_score:
+        profile_html = f'<span class="meta">profile +{html_text(profile_score)}</span>'
+    return f"""
+    <article class="segment {html.escape(kind)}">
+      <div class="segment-main">
+        <div class="kicker">{html_text(segment.get("role") or kind)} · {html_text(segment.get("time", ""))}</div>
+        <h3>{html_text(segment.get("title") or segment.get("segment_id"))}</h3>
+        <div class="row">
+          <span class="score">score {score}</span>
+          {profile_html}
+          <span class="meta">{tags}</span>
+          {skip_html}
+        </div>
+        <p>{html_text(segment.get("summary") or segment.get("reason") or "-")}</p>
+        <dl>
+          <dt>Transcript</dt><dd>{html_text(segment.get("transcript_excerpt") or "-")}</dd>
+          <dt>Visual</dt><dd>{html_text(segment.get("visual_description") or "-")}</dd>
+          <dt>Subjects</dt><dd>{html_text(compact_list(segment.get("visual_subjects")))}</dd>
+          <dt>Focus</dt><dd>{html_text(compact_list([item.get("display", "") for item in segment.get("focus_matches", [])]) if segment.get("focus_matches") else segment.get("focus_score", 0))}</dd>
+        </dl>
+      </div>
+      {html_image_grid(out_dir, segment)}
+    </article>
+    """
+
+
+def render_review_html(report: dict[str, Any], out_dir: Path) -> str:
+    focus_summary = report.get("project_focus", {}).get("summary", "")
+    selected_cards = "\n".join(render_segment_card(out_dir, segment, "selected") for segment in report.get("selected_segments", []))
+    near_miss_cards = "\n".join(render_segment_card(out_dir, segment, "near-miss") for segment in report.get("near_miss_segments", []))
+    contact_sheet = str(report.get("contact_sheet") or "")
+    contact_sheet_html = ""
+    if contact_sheet and (out_dir / contact_sheet).exists():
+        contact_sheet_html = f'<section><h2>Contact Sheet</h2><img class="contact" src="{html.escape(contact_sheet)}" alt="contact sheet"></section>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Highlight Review Report</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f6f7f2;
+      --ink: #1f2428;
+      --muted: #687076;
+      --line: #d9ded6;
+      --panel: #ffffff;
+      --accent: #18777f;
+      --warn: #9f5b00;
+    }}
+    body {{
+      margin: 0;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }}
+    header, main {{
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+    }}
+    header {{
+      padding: 28px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }}
+    h2 {{
+      margin: 28px 0 12px;
+      font-size: 20px;
+    }}
+    h3 {{
+      margin: 4px 0 8px;
+      font-size: 18px;
+    }}
+    .summary {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .metric, .segment {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }}
+    .metric {{
+      padding: 12px;
+    }}
+    .metric b {{
+      display: block;
+      font-size: 20px;
+    }}
+    .muted, .meta, .kicker {{
+      color: var(--muted);
+    }}
+    .segment {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(190px, 280px);
+      gap: 16px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }}
+    .row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }}
+    .score, .pill {{
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: #e6f3f1;
+      color: var(--accent);
+      font-weight: 650;
+      font-size: 13px;
+    }}
+    .warn {{
+      background: #fff1d7;
+      color: var(--warn);
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: 90px minmax(0, 1fr);
+      gap: 6px 12px;
+      margin: 10px 0 0;
+    }}
+    dt {{
+      color: var(--muted);
+    }}
+    dd {{
+      margin: 0;
+    }}
+    .thumbs {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }}
+    .thumb {{
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #eef0ec;
+    }}
+    .missing {{
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px;
+      box-sizing: border-box;
+    }}
+    .contact {{
+      max-width: 100%;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }}
+    @media (max-width: 760px) {{
+      .segment {{
+        grid-template-columns: 1fr;
+      }}
+      dl {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Highlight Review Report</h1>
+    <div class="muted">{html_text(report.get("source_video", ""))}</div>
+    <div class="summary">
+      <div class="metric"><b>{html_text(report.get("selected_count", 0))}</b>selected clips</div>
+      <div class="metric"><b>{html_text(report.get("selected_duration_sec", 0))}s</b>selected duration</div>
+      <div class="metric"><b>{html_text(report.get("target_duration_sec", 0))}s</b>target duration</div>
+      <div class="metric"><b>{html_text(focus_summary or "-")}</b>project focus</div>
+    </div>
+  </header>
+  <main>
+    {contact_sheet_html}
+    <section>
+      <h2>Selected Segments</h2>
+      {selected_cards or '<div class="muted">No selected segments.</div>'}
+    </section>
+    <section>
+      <h2>Near Misses</h2>
+      {near_miss_cards or '<div class="muted">No near misses.</div>'}
+    </section>
+  </main>
+</body>
+</html>
+"""
 
 
 def contact_sheet_inputs(report: dict[str, Any], out_dir: Path) -> list[Path]:
@@ -2263,12 +3350,230 @@ def write_review_report(out_dir: Path) -> dict[str, Any]:
     write_contact_sheet(out_dir, report)
     write_json(out_dir / "review_report.json", report)
     (out_dir / "review_report.md").write_text(render_review_markdown(report), encoding="utf-8")
+    (out_dir / "review_report.html").write_text(render_review_html(report, out_dir), encoding="utf-8")
     return report
+
+
+def srt_timestamp(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    whole_seconds = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        whole_seconds += 1
+        millis -= 1000
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{millis:03d}"
+
+
+def vtt_timestamp(seconds: float) -> str:
+    return srt_timestamp(seconds).replace(",", ".")
+
+
+def subtitle_text(text: str, max_chars: int = 46) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    midpoint = len(compact) // 2
+    split = compact.rfind(" ", 0, midpoint)
+    if split < max_chars * 0.25:
+        split = compact.find(" ", midpoint)
+    if split <= 0:
+        return compact
+    return compact[:split].strip() + "\n" + compact[split + 1 :].strip()
+
+
+def subtitle_cues_for_plan(out_dir: Path) -> list[dict[str, Any]]:
+    plan = read_json(out_dir / "edit_plan.json")
+    transcript = read_json(out_dir / "transcript.json")
+    segments = transcript_segments(transcript)
+    cues = []
+    output_cursor = 0.0
+    for planned in plan.get("selected_segments", []):
+        source_start = float(planned.get("source_start", 0.0))
+        source_end = float(planned.get("source_end", 0.0))
+        clip_duration = max(0.0, source_end - source_start)
+        for segment in segments:
+            text = string_value(segment.get("text"))
+            if not text or segment["end"] <= source_start or segment["start"] >= source_end:
+                continue
+            cue_start = output_cursor + max(0.0, float(segment["start"]) - source_start)
+            cue_end = output_cursor + min(clip_duration, float(segment["end"]) - source_start)
+            if cue_end - cue_start < 0.2:
+                continue
+            cues.append(
+                {
+                    "start": round(cue_start, 3),
+                    "end": round(cue_end, 3),
+                    "text": subtitle_text(text),
+                    "source_start": max(source_start, float(segment["start"])),
+                    "source_end": min(source_end, float(segment["end"])),
+                    "segment_id": planned.get("segment_id", ""),
+                }
+            )
+        output_cursor += clip_duration
+    return cues
+
+
+def render_srt(cues: list[dict[str, Any]]) -> str:
+    blocks = []
+    for index, cue in enumerate(cues, start=1):
+        blocks.append(
+            f"{index}\n"
+            f"{srt_timestamp(float(cue['start']))} --> {srt_timestamp(float(cue['end']))}\n"
+            f"{cue['text']}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def render_vtt(cues: list[dict[str, Any]]) -> str:
+    blocks = ["WEBVTT", ""]
+    for cue in cues:
+        blocks.append(f"{vtt_timestamp(float(cue['start']))} --> {vtt_timestamp(float(cue['end']))}")
+        blocks.append(str(cue["text"]))
+        blocks.append("")
+    return "\n".join(blocks)
+
+
+def write_subtitles(out_dir: Path) -> dict[str, Any]:
+    cues = subtitle_cues_for_plan(out_dir)
+    srt_path = out_dir / "subtitles.srt"
+    vtt_path = out_dir / "subtitles.vtt"
+    srt_path.write_text(render_srt(cues), encoding="utf-8")
+    vtt_path.write_text(render_vtt(cues), encoding="utf-8")
+    result = {
+        "version": "subtitle_export_v1",
+        "cue_count": len(cues),
+        "srt_path": str(srt_path),
+        "vtt_path": str(vtt_path),
+    }
+    write_json(out_dir / "subtitles.json", result)
+    return result
+
+
+def artifact_mtime(path: Path) -> float:
+    return path.stat().st_mtime if path.exists() else 0.0
+
+
+def stale_after(target: Path, dependencies: list[Path]) -> bool:
+    if not target.exists():
+        return True
+    target_mtime = artifact_mtime(target)
+    return any(path.exists() and artifact_mtime(path) > target_mtime for path in dependencies)
+
+
+def scored_item_has_visual_coverage(item: dict[str, Any], visual_ids: set[Any]) -> bool:
+    item_id = item.get("id")
+    if item_id in visual_ids:
+        return True
+    signals = item.get("signals", {}) if isinstance(item.get("signals"), dict) else {}
+    parent_id = signals.get("parent_candidate_id")
+    if parent_id in visual_ids:
+        return True
+    if signals.get("thumbnails"):
+        return True
+    vision = signals.get("vision", {})
+    if isinstance(vision, dict) and (vision.get("captions") or vision.get("summary")):
+        return True
+    visual_quality = signals.get("visual_quality", {})
+    return isinstance(visual_quality, dict) and bool(visual_quality)
+
+
+def doctor_check(out_dir: Path) -> dict[str, Any]:
+    checks = []
+
+    def add(name: str, status: str, detail: str = "") -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    source_path = out_dir / "source.json"
+    if not source_path.exists():
+        add("source.json", "error", "missing")
+        return {"version": "doctor_report_v1", "status": "error", "checks": checks}
+
+    try:
+        source = read_json(source_path)
+    except json.JSONDecodeError as exc:
+        add("source.json", "error", f"invalid JSON: {exc}")
+        return {"version": "doctor_report_v1", "status": "error", "checks": checks}
+
+    source_video = Path(str(source.get("source_video", ""))).expanduser()
+    if not source_video.exists():
+        add("source_video", "error", f"missing: {source_video}")
+    else:
+        current = {"source_video": str(source_video), "fingerprint": source_fingerprint(source_video)}
+        fingerprint_ok = source_matches(source, current)
+        add(
+            "source_fingerprint",
+            "ok" if fingerprint_ok else "error",
+            "" if fingerprint_ok else "source video changed since prepare",
+        )
+
+    required = ["transcript.json", "candidates.json", "scored_segments.json", "edit_plan.json"]
+    for name in required:
+        add(name, "ok" if (out_dir / name).exists() else "error", "missing" if not (out_dir / name).exists() else "")
+
+    dependencies = {
+        "candidates.json": ["transcript.json"],
+        "scored_segments.json": ["candidates.json", "visual_segments.json", PROFILE_ARTIFACT],
+        "edit_plan.json": ["scored_segments.json"],
+        "review_report.json": ["edit_plan.json", "scored_segments.json"],
+        "review_report.html": ["review_report.json"],
+        "subtitles.srt": ["edit_plan.json", "transcript.json"],
+        "subtitles.vtt": ["edit_plan.json", "transcript.json"],
+    }
+    for target_name, dependency_names in dependencies.items():
+        target = out_dir / target_name
+        deps = [out_dir / name for name in dependency_names]
+        if target.exists() and stale_after(target, deps):
+            newer = [name for name in dependency_names if (out_dir / name).exists() and artifact_mtime(out_dir / name) > artifact_mtime(target)]
+            add(target_name, "warn", "stale after " + ", ".join(newer))
+
+    plan_path = out_dir / "edit_plan.json"
+    if plan_path.exists():
+        try:
+            plan = read_json(plan_path)
+            duration = float(source.get("duration_sec", 0.0) or 0.0)
+            errors = validate_edit_plan(plan, duration)
+            add("edit_plan_valid", "ok" if not errors else "error", "; ".join(errors))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            add("edit_plan_valid", "error", str(exc))
+
+    visual_path = out_dir / "visual_segments.json"
+    scored_path = out_dir / "scored_segments.json"
+    if visual_path.exists() and scored_path.exists():
+        visual_ids = {item.get("id") for item in read_json(visual_path) if isinstance(item, dict)}
+        scored_items = [item for item in read_json(scored_path) if isinstance(item, dict)]
+        missing_visuals = sorted(
+            str(item.get("id"))
+            for item in scored_items
+            if item.get("id") and not scored_item_has_visual_coverage(item, visual_ids)
+        )
+        if missing_visuals:
+            add("visual_coverage", "warn", f"{len(missing_visuals)} scored segments lack visual metadata")
+        else:
+            add("visual_coverage", "ok")
+
+    output_video = out_dir / "output" / "highlight.mp4"
+    if output_video.exists() and plan_path.exists() and artifact_mtime(plan_path) > artifact_mtime(output_video):
+        add("output/highlight.mp4", "warn", "stale after edit_plan.json")
+    elif output_video.exists():
+        add("output/highlight.mp4", "ok")
+    else:
+        add("output/highlight.mp4", "warn", "not rendered yet")
+
+    if any(check["status"] == "error" for check in checks):
+        status = "error"
+    elif any(check["status"] == "warn" for check in checks):
+        status = "warn"
+    else:
+        status = "ok"
+    return {"version": "doctor_report_v1", "status": status, "checks": checks}
 
 
 def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
     require_tool("ffmpeg")
     plan = read_json(out_dir / "edit_plan.json")
+    settings = resolve_render_settings(out_dir, plan, settings)
     source_video = Path(plan["source_video"])
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -2296,7 +3601,7 @@ def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
         raise SystemExit("edit_plan.json has no selected_segments to render.")
     concat_lines = [f"file '{clip.resolve().as_posix()}'" for clip in clip_paths]
     concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
-    output_video = Path(plan["output_video"])
+    output_video = out_dir / "output" / "highlight.mp4"
     output_video.parent.mkdir(parents=True, exist_ok=True)
     run_command(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_path), "-c", "copy", str(output_video)])
 
@@ -2306,21 +3611,24 @@ def command_prepare(args: argparse.Namespace) -> None:
     if not source_video.exists():
         raise SystemExit(f"Input video not found: {source_video}")
     out_dir = Path(args.out)
+    profile = load_profile(getattr(args, "profile", "default"), getattr(args, "profile_file", ""))
     init_work_dir(out_dir, source_video, args.force)
     if args.force:
         invalidate_generated_artifacts(out_dir)
         ensure_work_subdirs(out_dir)
+    write_work_profile(out_dir, profile)
     audio_path = extract_audio(source_video, out_dir, args.force)
     transcript_path = transcribe_audio(audio_path, out_dir, args.whisper_model, args.force)
     transcript = read_json(transcript_path)
     source = read_json(out_dir / "source.json")
-    candidates = generate_candidates_from_transcript(transcript, source["duration_sec"])
+    candidates = generate_candidates_from_transcript(transcript, source["duration_sec"], profile)
     write_json(out_dir / "candidates.json", candidates)
     log(f"Wrote {len(candidates)} candidates to {out_dir / 'candidates.json'}")
 
 
 def command_score(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
+    profile = load_work_profile(out_dir)
     source = read_json(out_dir / "source.json")
     target_duration = resolve_target_duration(float(source.get("duration_sec", 0.0)), args.target_duration, args.retention_ratio)
     candidates = read_json(out_dir / "candidates.json")
@@ -2333,7 +3641,7 @@ def command_score(args: argparse.Namespace) -> None:
     project_focus = infer_project_focus(candidates)
     write_json(out_dir / "project_focus.json", project_focus)
     candidates = attach_focus_signals(candidates, project_focus)
-    scored = score_candidates(candidates, args.planner, args.model)
+    scored = apply_profile_scoring(score_candidates(candidates), profile)
     write_json(out_dir / "scored_segments.json", scored)
     write_project_summary(out_dir, target_duration)
     log(f"Wrote {len(scored)} scored segments to {out_dir / 'scored_segments.json'}")
@@ -2344,28 +3652,89 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
         Path(args.work_dir),
         args.thumbnail_count,
         args.ocr_languages,
-        args.vision_model,
-        args.ollama_url,
+        args.output_size,
     )
     log(f"Wrote visual metadata for {len(visual_segments)} candidates to {Path(args.work_dir) / 'visual_segments.json'}")
 
 
 def command_plan(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
-    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio)
+    plan = build_edit_plan(out_dir, args.target_duration, args.clip_padding, args.retention_ratio, args.selection_mode)
     write_json(out_dir / "edit_plan.json", plan)
     write_project_summary(out_dir, plan["target_duration_sec"])
     write_review_report(out_dir)
     log(f"Wrote edit plan with {len(plan['selected_segments'])} segments to {out_dir / 'edit_plan.json'}")
 
 
+def command_review_gate(args: argparse.Namespace) -> dict[str, Any]:
+    out_dir = Path(args.work_dir)
+    confidence = compute_plan_confidence(out_dir)
+    build_gpt_review_packet(out_dir, confidence, args.top_candidates)
+    log(
+        "Review gate: "
+        f"{confidence['status']} "
+        f"(confidence={confidence['confidence_score']}, action={confidence['recommended_action']})"
+    )
+    if confidence["triggered_rules"]:
+        for rule in confidence["triggered_rules"]:
+            detail = rule.get("detail", rule.get("value", ""))
+            log(f"- {rule.get('rule')}: {detail}")
+    log(f"Wrote {out_dir / 'plan_confidence.json'} and {out_dir / 'gpt_review_packet.json'}")
+    return confidence
+
+
+def command_review_summary(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    confidence = compute_plan_confidence(out_dir)
+    packet = build_gpt_review_packet(out_dir, confidence, args.top_candidates)
+    log(render_review_summary(out_dir, confidence, packet, args.near_misses))
+
+
+def command_apply_review(args: argparse.Namespace) -> None:
+    review_result_path = Path(args.review_result) if args.review_result else None
+    applied = apply_codex_review(Path(args.work_dir), review_result_path)
+    log(
+        "Review apply result: "
+        f"decision={applied['decision']} "
+        f"changed={applied['changed']}"
+    )
+
+
 def command_report(args: argparse.Namespace) -> None:
     out_dir = Path(args.work_dir)
     report = write_review_report(out_dir)
-    log(f"Wrote review report for {report['selected_count']} segments to {out_dir / 'review_report.md'}")
+    log(f"Wrote review report for {report['selected_count']} segments to {out_dir / 'review_report.md'} and {out_dir / 'review_report.html'}")
+
+
+def command_subtitles(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    result = write_subtitles(out_dir)
+    log(f"Wrote {result['cue_count']} subtitle cues to {out_dir / 'subtitles.srt'} and {out_dir / 'subtitles.vtt'}")
+
+
+def command_profiles(args: argparse.Namespace) -> None:
+    for name in sorted(BUILTIN_PROFILES):
+        profile = BUILTIN_PROFILES[name]
+        recommended = profile.get("recommended_selection_mode", "")
+        suffix = f" (recommended selection: {recommended})" if recommended else ""
+        log(f"{name}: {profile.get('description', '')}{suffix}")
+
+
+def command_doctor(args: argparse.Namespace) -> None:
+    out_dir = Path(args.work_dir)
+    report = doctor_check(out_dir)
+    write_json(out_dir / "doctor_report.json", report)
+    log(f"Doctor status: {report['status']}")
+    for check in report.get("checks", []):
+        detail = f" - {check['detail']}" if check.get("detail") else ""
+        log(f"{check['status'].upper()}: {check['name']}{detail}")
+    if report["status"] == "error":
+        raise SystemExit(1)
 
 
 def command_render(args: argparse.Namespace) -> None:
+    if getattr(args, "subtitles", False):
+        write_subtitles(Path(args.work_dir))
     settings = RenderSettings(
         output_size=args.output_size,
         crf=args.crf,
@@ -2373,12 +3742,20 @@ def command_render(args: argparse.Namespace) -> None:
         audio_bitrate=args.audio_bitrate,
         video_bitrate=args.video_bitrate,
         fade_duration=args.fade_duration,
+        quality_mode=args.quality_mode,
     )
     render_edit_plan(Path(args.work_dir), settings)
 
 
 def command_run(args: argparse.Namespace) -> None:
-    prepare_args = argparse.Namespace(input=args.input, out=args.out, whisper_model=args.whisper_model, force=args.force)
+    prepare_args = argparse.Namespace(
+        input=args.input,
+        out=args.out,
+        whisper_model=args.whisper_model,
+        force=args.force,
+        profile=getattr(args, "profile", "default"),
+        profile_file=getattr(args, "profile_file", ""),
+    )
     command_prepare(prepare_args)
     if args.visuals:
         command_analyze_visuals(
@@ -2386,14 +3763,11 @@ def command_run(args: argparse.Namespace) -> None:
                 work_dir=args.out,
                 thumbnail_count=args.thumbnail_count,
                 ocr_languages=args.ocr_languages,
-                vision_model=args.vision_model,
-                ollama_url=args.ollama_url,
+                output_size=args.output_size,
             )
         )
     score_args = argparse.Namespace(
         work_dir=args.out,
-        planner=args.planner,
-        model=args.model,
         target_duration=args.target_duration,
         retention_ratio=args.retention_ratio,
     )
@@ -2403,17 +3777,31 @@ def command_run(args: argparse.Namespace) -> None:
         target_duration=args.target_duration,
         clip_padding=args.clip_padding,
         retention_ratio=args.retention_ratio,
+        selection_mode=args.selection_mode,
     )
     command_plan(plan_args)
+    if args.review_mode != "off":
+        review_args = argparse.Namespace(work_dir=args.out, top_candidates=args.review_top_candidates)
+        confidence = command_review_gate(review_args)
+        should_handoff = args.review_mode == "always" or confidence["status"] in {"yellow", "red"}
+        if should_handoff:
+            raise SystemExit(
+                "Review gate requires Codex CLI editorial handoff before render. "
+                f"Status={confidence['status']}; action={confidence['recommended_action']}. "
+                f"Read {Path(args.out) / 'gpt_review_packet.json'}, write codex_review_result.json, "
+                f"run python3 auto_highlight.py apply-review {args.out}, then run render."
+            )
     command_render(
         argparse.Namespace(
             work_dir=args.out,
+            subtitles=True,
             output_size=args.output_size,
             crf=args.crf,
             preset=args.preset,
             audio_bitrate=args.audio_bitrate,
             video_bitrate=args.video_bitrate,
             fade_duration=args.fade_duration,
+            quality_mode=args.quality_mode,
         )
     )
 
@@ -2427,12 +3815,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--out", required=True, help="Work directory")
     prepare.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     prepare.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
+    prepare.add_argument("--profile", choices=sorted(BUILTIN_PROFILES), default="default", help="Built-in highlight style profile")
+    prepare.add_argument("--profile-file", default="", help="Custom highlight profile JSON file")
     prepare.set_defaults(func=command_prepare)
 
     score = subparsers.add_parser("score", help="Score candidate segments")
     score.add_argument("work_dir", help="Work directory")
-    score.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    score.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
     score.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     score.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     score.set_defaults(func=command_score)
@@ -2441,8 +3829,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_visuals_parser.add_argument("work_dir", help="Work directory")
     analyze_visuals_parser.add_argument("--thumbnail-count", type=int, default=3)
     analyze_visuals_parser.add_argument("--ocr-languages", default="chi_tra+eng")
-    analyze_visuals_parser.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
-    analyze_visuals_parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    analyze_visuals_parser.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Analysis proxy maximum size as WIDTHxHEIGHT")
     analyze_visuals_parser.set_defaults(func=command_analyze_visuals)
 
     plan = subparsers.add_parser("plan", help="Create edit_plan.json from scored segments")
@@ -2450,20 +3837,50 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     plan.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     plan.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
+    plan.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
     plan.set_defaults(func=command_plan)
+
+    review_gate = subparsers.add_parser("review-gate", help="Evaluate edit_plan confidence and prepare Codex CLI review packet")
+    review_gate.add_argument("work_dir", help="Work directory")
+    review_gate.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
+    review_gate.set_defaults(func=command_review_gate)
+
+    review_summary = subparsers.add_parser("review-summary", help="Print a human-readable Scheme C review summary")
+    review_summary.add_argument("work_dir", help="Work directory")
+    review_summary.add_argument("--top-candidates", type=int, default=20, help="Number of top scored candidates to include in the review packet")
+    review_summary.add_argument("--near-misses", type=int, default=5, help="Number of near-miss candidates to print")
+    review_summary.set_defaults(func=command_review_summary)
+
+    apply_review = subparsers.add_parser("apply-review", help="Validate and apply codex_review_result.json to edit_plan.json")
+    apply_review.add_argument("work_dir", help="Work directory")
+    apply_review.add_argument("--review-result", default="", help="Path to review result JSON; defaults to work_dir/codex_review_result.json")
+    apply_review.set_defaults(func=command_apply_review)
 
     report = subparsers.add_parser("report", help="Create review_report.md and review_report.json from the edit plan")
     report.add_argument("work_dir", help="Work directory")
     report.set_defaults(func=command_report)
 
+    subtitles = subparsers.add_parser("subtitles", help="Export subtitles.srt and subtitles.vtt for the rendered highlight timeline")
+    subtitles.add_argument("work_dir", help="Work directory")
+    subtitles.set_defaults(func=command_subtitles)
+
+    doctor = subparsers.add_parser("doctor", help="Check work artifacts for missing, stale, or invalid pipeline state")
+    doctor.add_argument("work_dir", help="Work directory")
+    doctor.set_defaults(func=command_doctor)
+
+    profiles = subparsers.add_parser("profiles", help="List built-in highlight style profiles")
+    profiles.set_defaults(func=command_profiles)
+
     render = subparsers.add_parser("render", help="Render highlight.mp4 from edit_plan.json")
     render.add_argument("work_dir", help="Work directory")
+    render.add_argument("--subtitles", action="store_true", help="Also export subtitles.srt and subtitles.vtt before rendering")
     render.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
     render.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
     render.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
     render.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     render.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     render.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
+    render.add_argument("--quality-mode", choices=["manual", "auto"], default="manual", help="Use fixed render settings or infer 1080p/1440p/4K from selected clip quality")
     render.set_defaults(func=command_render)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
@@ -2471,22 +3888,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--out", required=True, help="Work directory")
     run.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     run.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
-    run.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    run.add_argument("--model", default="qwen2.5:3b", help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     run.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
+    run.add_argument("--profile", choices=sorted(BUILTIN_PROFILES), default="default", help="Built-in highlight style profile")
+    run.add_argument("--profile-file", default="", help="Custom highlight profile JSON file")
     run.add_argument("--visuals", action="store_true", help="Analyze thumbnails and optional OCR before scoring")
     run.add_argument("--thumbnail-count", type=int, default=3)
     run.add_argument("--ocr-languages", default="chi_tra+eng")
-    run.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
-    run.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     run.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
     run.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
     run.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
     run.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC audio bitrate")
     run.add_argument("--video-bitrate", default="", help="Optional video bitrate such as 3500k; overrides CRF when set")
     run.add_argument("--fade-duration", type=non_negative_float_arg, default=DEFAULT_FADE_DURATION, help="Seconds for per-clip audio/video fade in and fade out")
+    run.add_argument("--quality-mode", choices=["manual", "auto"], default="manual", help="Use fixed render settings or infer 1080p/1440p/4K from selected clip quality")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
+    run.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
+    run.add_argument("--review-mode", choices=["off", "auto", "always"], default="auto", help="Run Scheme C confidence gate before render")
+    run.add_argument("--review-top-candidates", type=int, default=20, help="Number of top scored candidates to include in the Codex review packet")
     run.set_defaults(func=command_run)
 
     return parser

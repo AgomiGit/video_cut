@@ -853,6 +853,7 @@
         </div>
         <nav class="nav" aria-label="頁面章節">
           <a href="#use">剪片步驟</a>
+          <a href="#profiles">剪輯風格</a>
           <a href="#install">安裝工具</a>
           <a href="#algorithm">演算法</a>
           <a href="#files">輸出檔案</a>
@@ -930,6 +931,17 @@
             <p class="muted">先用關鍵字和說話密度縮小範圍，AI 只看比較有機會的片段。</p>
           </div>
         </article>
+        <article class="info-card">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h16"></path><path d="M7 7v10"></path><path d="M17 7v10"></path><path d="M4 17h16"></path>
+            </svg>
+          </span>
+          <div>
+            <strong>可選剪輯風格</strong>
+            <p class="muted">用 travel、family、teaching、funny 等 profile，讓同一支影片用不同口味挑片。</p>
+          </div>
+        </article>
       </section>
 
       <section class="section" id="use">
@@ -965,21 +977,21 @@
             <div class="step-head">
               <span class="step-number">2</span>
               <div>
-                <h3>一行指令跑完整流程</h3>
-                <p class="muted">最簡單的方式是用 <code>run</code>。下面例子會做出大約 180 秒的精華影片，並用 <code>qwen2.5vl:7b</code> 看縮圖。</p>
+                <h3>一行指令跑內容優先流程</h3>
+                <p class="muted">旅遊、景點、展覽或戶外影片建議用 <code>content-first</code>。它會先看縮圖和畫面亮點，再決定要保留哪些片段，並用 <code>quality-mode auto</code> 自動選 1080p、1440p 或 4K。</p>
               </div>
             </div>
             <div class="mini-art">
               <div class="terminal-art" aria-label="終端機指令示意">
-                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b<br>
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto<br>
                 → 讀影片<br>
-                → 找片段<br>
+                → 找畫面亮點<br>
                 → 輸出 highlight.mp4
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b">複製</button>
-              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --target-duration 180 --visuals --vision-model qwen2.5vl:7b</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto</code></pre>
             </div>
           </article>
 
@@ -988,7 +1000,7 @@
               <span class="step-number">3</span>
               <div>
                 <h3>想慢慢檢查，就分段執行</h3>
-                <p class="muted">如果影片很長，建議分成四步。每一步會留下檔案，方便你知道程式做到哪裡。</p>
+                <p class="muted">如果影片很長，建議分段執行。每一步會留下檔案，方便你知道程式做到哪裡。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1000,12 +1012,16 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner heuristic&#10;uv run python auto_highlight.py plan work/video1 --target-duration 180&#10;uv run python auto_highlight.py render work/video1">複製</button>
-              <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1
-uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
-uv run python auto_highlight.py score work/video1 --planner heuristic
-uv run python auto_highlight.py plan work/video1 --target-duration 180
-uv run python auto_highlight.py render work/video1</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1 --profile travel&#10;uv run python auto_highlight.py analyze-visuals work/video1&#10;uv run python auto_highlight.py score work/video1&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py subtitles work/video1&#10;uv run python auto_highlight.py doctor work/video1&#10;uv run python auto_highlight.py render work/video1 --quality-mode auto --subtitles">複製</button>
+              <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1 --profile travel
+uv run python auto_highlight.py analyze-visuals work/video1
+uv run python auto_highlight.py score work/video1
+uv run python auto_highlight.py plan work/video1 --selection-mode content-first
+uv run python auto_highlight.py review-gate work/video1
+uv run python auto_highlight.py review-summary work/video1
+uv run python auto_highlight.py subtitles work/video1
+uv run python auto_highlight.py doctor work/video1
+uv run python auto_highlight.py render work/video1 --quality-mode auto --subtitles</code></pre>
             </div>
           </article>
 
@@ -1014,7 +1030,7 @@ uv run python auto_highlight.py render work/video1</code></pre>
               <span class="step-number">4</span>
               <div>
                 <h3>打開輸出的精華影片</h3>
-                <p class="muted">完成後，影片會在 <code>work/video1/output/highlight.mp4</code>。如果不滿意，可以調整秒數或重新跑分。</p>
+                <p class="muted">完成後，影片會在 <code>work/video1/output/highlight.mp4</code>。如果不滿意，可以看 <code>review_report.html</code> 或 <code>review_contact_sheet.jpg</code>，再調整選片模式或重新跑分。</p>
               </div>
             </div>
             <div class="mini-art">
@@ -1034,14 +1050,51 @@ uv run python auto_highlight.py render work/video1</code></pre>
 
         <div class="callout">
           <strong>小提醒：</strong>
-          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。
+          如果 <code>work/video1</code> 已經有舊成果，請換一個新資料夾，例如 <code>work/my_first_cut</code>，這樣比較不會蓋到之前剪好的內容。使用 <code>--quality-mode auto</code> 時，低光室內粗顆粒會偏向 1080p，清楚戶外景點才會偏向 4K。
+        </div>
+      </section>
+
+      <section class="section" id="profiles">
+        <h2>剪輯風格 preset</h2>
+        <p class="section-intro">
+          同一支影片可能有不同剪法。profile 會調整候選關鍵字和分數加權，讓工具用更接近你想要的口味挑片。
+        </p>
+
+        <div class="explain-grid">
+          <article class="explain-card">
+            <h3><code>travel</code></h3>
+            <p class="muted">適合旅遊、景點、展覽、街景、店家、地標與戶外畫面，通常搭配 <code>content-first</code>。</p>
+          </article>
+          <article class="explain-card">
+            <h3><code>family</code></h3>
+            <p class="muted">適合家人、小孩、寵物、可愛反應與近距離互動。</p>
+          </article>
+          <article class="explain-card">
+            <h3><code>teaching</code></h3>
+            <p class="muted">適合教學、示範、步驟、重點句與結論整理。</p>
+          </article>
+          <article class="explain-card">
+            <h3><code>funny</code></h3>
+            <p class="muted">適合好笑、驚訝、尷尬、短節奏反應片段。</p>
+          </article>
+        </div>
+
+        <div class="code-box">
+          <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py profiles&#10;uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel">複製</button>
+          <pre><code>uv run python auto_highlight.py profiles
+uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel</code></pre>
+        </div>
+
+        <div class="callout">
+          <strong>檢查 preset 影響：</strong>
+          每次執行會寫出 <code>highlight_profile.json</code>。片段分數裡也會留下 <code>profile_score</code>、<code>profile_adjusted_from</code> 和 <code>profile_name</code>，方便回頭看是哪個風格把片段拉高。
         </div>
       </section>
 
       <section class="section" id="install">
         <h2>事前需要安裝哪些工具</h2>
         <p class="section-intro">
-          這個專案像一個小隊伍。Python 負責指揮，ffmpeg 負責處理影片，faster-whisper 負責把聲音變文字，Ollama 是可選的本機 AI 評審。
+          這個專案像一個小隊伍。Python 負責指揮，ffmpeg 負責處理影片，faster-whisper 負責把聲音變文字，預設流程則維持 deterministic / heuristic，不需要本機 LLM。
         </p>
 
         <div class="install-layout">
@@ -1070,8 +1123,8 @@ uv run python auto_highlight.py render work/video1</code></pre>
             <article class="tool-card">
               <span class="icon-box" aria-hidden="true">AI</span>
               <div>
-                <strong>Ollama，可選</strong>
-                <p class="muted">如果你想用本機模型幫文字打分或描述縮圖，可以安裝它。</p>
+                <strong>不需本機 LLM</strong>
+                <p class="muted">預設流程走 deterministic / heuristic；Codex CLI 會在需要時用 gpt-5.4-mini 子代理處理簡單側任務，複雜審稿則交給主 Codex agent（gpt-5.5）。</p>
               </div>
             </article>
           </div>
@@ -1091,13 +1144,7 @@ uv run python auto_highlight.py render work/video1</code></pre>
                 <pre><code>brew install ffmpeg uv
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可到官方網站下載，或用 Homebrew 安裝。<code>qwen2.5:3b</code> 用來看文字片段，<code>qwen2.5vl:7b</code> 用來描述縮圖。</p>
-              <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="brew install ollama&#10;ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>brew install ollama
-ollama pull qwen2.5:3b
-ollama pull qwen2.5vl:7b</code></pre>
-              </div>
+              <p class="muted">這個流程不需要安裝本機 LLM。縮圖與片段判斷留給規則流程與 Codex 審稿。</p>
             </div>
 
             <div class="tab-panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
@@ -1109,11 +1156,10 @@ ollama pull qwen2.5vl:7b</code></pre>
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可以從官方網站下載 Windows 版，裝好後再拉模型。<code>qwen2.5:3b</code> 看文字，<code>qwen2.5vl:7b</code> 看縮圖。</p>
+              <p class="muted">Windows 不需要本機 LLM。先安裝 ffmpeg 和 uv 即可。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>ollama pull qwen2.5:3b
-ollama pull qwen2.5vl:7b</code></pre>
+                <button class="copy-btn" type="button" data-copy="uv sync --extra transcribe">複製</button>
+                <pre><code>uv sync --extra transcribe</code></pre>
               </div>
             </div>
 
@@ -1127,12 +1173,13 @@ sudo apt install ffmpeg python3 python3-pip
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 是可選項，需要本機模型時再裝。文字打分用 <code>qwen2.5:3b</code>，縮圖描述用 <code>qwen2.5vl:7b</code>。</p>
+              <p class="muted">Linux 也不需要本機 LLM。這個專案預設走 deterministic / heuristic，必要時由 gpt-5.4-mini 子代理處理簡單側任務。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="curl -fsSL https://ollama.com/install.sh | sh&#10;ollama pull qwen2.5:3b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:3b
-ollama pull qwen2.5vl:7b</code></pre>
+                <button class="copy-btn" type="button" data-copy="sudo apt update&#10;sudo apt install ffmpeg python3 python3-pip&#10;curl -LsSf https://astral.sh/uv/install.sh | sh&#10;uv sync --extra transcribe">複製</button>
+                <pre><code>sudo apt update
+sudo apt install ffmpeg python3 python3-pip
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --extra transcribe</code></pre>
               </div>
             </div>
           </div>
@@ -1158,9 +1205,9 @@ ollama pull qwen2.5vl:7b</code></pre>
               <td data-label="看到什麼代表成功">出現 uv 的版本號。</td>
             </tr>
             <tr>
-              <td data-label="檢查項目">Ollama，可選</td>
-              <td data-label="指令"><code>ollama list</code></td>
-              <td data-label="看到什麼代表成功">能列出模型，或至少沒有找不到指令。</td>
+              <td data-label="檢查項目">不需本機 LLM</td>
+              <td data-label="指令"><code>uv sync --extra transcribe</code></td>
+              <td data-label="看到什麼代表成功">依賴安裝完成，沒有卡在額外下載。</td>
             </tr>
           </tbody>
         </table>
@@ -1199,7 +1246,16 @@ ollama pull qwen2.5vl:7b</code></pre>
                 </svg>
               </span>
               <h3>3. 找候選片段</h3>
-              <p class="muted">看到「哇、你看、好吃、景點」等字，就把前後幾秒抓出來。</p>
+              <p class="muted">看到「哇、你看、好吃、景點」等字，就把前後幾秒抓出來；如果有指定 profile，也會加入該風格的關鍵字。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 6h16v12H4z"></path><path d="M8 10h8"></path><path d="M8 14h5"></path>
+                </svg>
+              </span>
+              <h3>4. 建立分析版影片</h3>
+              <p class="muted">如果要看縮圖，會先產生 output 等級的 analysis_video.mp4，再從這個較小的 proxy 抽畫面。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
@@ -1207,8 +1263,8 @@ ollama pull qwen2.5vl:7b</code></pre>
                   <path d="M4 19V5"></path><path d="M8 17V9"></path><path d="M12 17V7"></path><path d="M16 17v-5"></path><path d="M20 17V4"></path>
                 </svg>
               </span>
-              <h3>4. 幫片段打分</h3>
-              <p class="muted">看關鍵字、說話密度、情緒字、地點字，也可請 Ollama 補充判斷。</p>
+              <h3>5. 幫片段打分</h3>
+              <p class="muted">看關鍵字、說話密度、情緒字、地點字，預設走 deterministic / heuristic；複雜審稿交給主 Codex agent（gpt-5.5），簡單側任務可派 gpt-5.4-mini 子代理，profile 會留下可追蹤的分數加成。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
@@ -1216,8 +1272,17 @@ ollama pull qwen2.5vl:7b</code></pre>
                   <path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>
                 </svg>
               </span>
-              <h3>5. 排成剪輯計畫</h3>
+              <h3>6. 排成剪輯計畫</h3>
               <p class="muted">挑高分片段，避免重複，盡量接近目標秒數。</p>
+            </article>
+            <article class="flow-step">
+              <span class="flow-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 6 9 17l-5-5"></path><path d="M14 6h6v6"></path><path d="M4 20h16"></path>
+                </svg>
+              </span>
+              <h3>7. 信心檢查</h3>
+              <p class="muted">用 green/yellow/red 判斷剪輯計畫是否穩；yellow 或 red 時由 Codex CLI 接手審稿，再用 apply-review 驗證套用。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">
@@ -1225,8 +1290,8 @@ ollama pull qwen2.5vl:7b</code></pre>
                   <path d="M4 4h16v16H4z"></path><path d="M10 8l6 4-6 4z"></path>
                 </svg>
               </span>
-              <h3>6. 輸出影片</h3>
-              <p class="muted">ffmpeg 依照 edit_plan.json 切片、淡入淡出、合成 highlight.mp4。</p>
+              <h3>8. 輸出影片</h3>
+              <p class="muted">ffmpeg 依照 edit_plan.json 切片、淡入淡出、合成 highlight.mp4，也可先輸出 SRT/VTT 字幕。</p>
             </article>
           </div>
         </div>
@@ -1244,10 +1309,18 @@ ollama pull qwen2.5vl:7b</code></pre>
             <h3>分數怎麼想？</h3>
             <p class="muted">像老師改考卷一樣，不只看一題。它會看好笑、互動、地點、清楚度、可不可以單獨看懂。</p>
           </article>
+          <article class="explain-card">
+            <h3>Codex 什麼時候接手？</h3>
+            <p class="muted">如果信心檢查是 green 就直接輸出；如果是 yellow 或 red，Codex CLI 會讀剪輯計畫、分數、review report 和縮圖，幫忙確認或重排片段。</p>
+          </article>
+          <article class="explain-card">
+            <h3>doctor 在檢查什麼？</h3>
+            <p class="muted">它會看來源影片有沒有變、JSON 是否缺漏、報告或字幕是否比上游檔案舊，以及 edit_plan 是否有重疊或超出影片範圍。</p>
+          </article>
         </div>
 
         <span class="formula" aria-label="簡化打分公式">
-          簡化想法：總分 = 關鍵字 + 說話密度 + 互動感 + 情緒 + 地點價值 - 品質扣分
+          簡化想法：總分 = 關鍵字 + 說話密度 + 互動感 + 情緒 + 地點價值 + profile 加成 - 品質扣分
         </span>
       </section>
 
@@ -1279,12 +1352,32 @@ ollama pull qwen2.5vl:7b</code></pre>
             <tr>
               <td data-label="檔案或資料夾"><code>scored_segments.json</code></td>
               <td data-label="用途">片段分數</td>
-              <td data-label="用白話說">每段為什麼被看好，分數是多少。</td>
+              <td data-label="用白話說">每段為什麼被看好，分數是多少；如果有 profile，也會記錄加分來源。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>highlight_profile.json</code></td>
+              <td data-label="用途">剪輯風格設定</td>
+              <td data-label="用白話說">這次 run 用 default、travel、family、teaching 還是 funny。</td>
             </tr>
             <tr>
               <td data-label="檔案或資料夾"><code>edit_plan.json</code></td>
               <td data-label="用途">最後剪輯計畫</td>
               <td data-label="用白話說">真正要剪哪幾段、順序怎麼排。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>review_report.html</code></td>
+              <td data-label="用途">圖文審稿頁</td>
+              <td data-label="用白話說">用瀏覽器看已選片段、near misses、縮圖、分數和原因。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>subtitles.srt</code> / <code>subtitles.vtt</code></td>
+              <td data-label="用途">成片字幕</td>
+              <td data-label="用白話說">依照 highlight 成片時間軸重新對齊的字幕檔。</td>
+            </tr>
+            <tr>
+              <td data-label="檔案或資料夾"><code>doctor_report.json</code></td>
+              <td data-label="用途">狀態檢查</td>
+              <td data-label="用白話說">記錄 work 資料夾是否缺檔、過期或來源影片不一致。</td>
             </tr>
             <tr>
               <td data-label="檔案或資料夾"><code>output/highlight.mp4</code></td>

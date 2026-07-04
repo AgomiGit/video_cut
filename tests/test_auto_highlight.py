@@ -1,3 +1,5 @@
+import argparse
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -7,6 +9,32 @@ import auto_highlight as ah
 
 
 class AutoHighlightTests(unittest.TestCase):
+    def run_args(self, **overrides):
+        args = {
+            "input": "input.mp4",
+            "out": "work/video1",
+            "whisper_model": "small",
+            "force": False,
+            "visuals": False,
+            "thumbnail_count": 3,
+            "ocr_languages": "chi_tra+eng",
+            "output_size": "1080x1920",
+            "target_duration": 60,
+            "retention_ratio": ah.DEFAULT_TARGET_RETENTION_RATIO,
+            "clip_padding": ah.DEFAULT_CLIP_PADDING,
+            "selection_mode": "duration",
+            "review_mode": "off",
+            "review_top_candidates": 20,
+            "crf": ah.DEFAULT_RENDER_CRF,
+            "preset": ah.DEFAULT_RENDER_PRESET,
+            "audio_bitrate": ah.DEFAULT_AUDIO_BITRATE,
+            "video_bitrate": "",
+            "fade_duration": ah.DEFAULT_FADE_DURATION,
+            "quality_mode": "manual",
+        }
+        args.update(overrides)
+        return argparse.Namespace(**args)
+
     def test_format_time_rounds_to_hh_mm_ss(self):
         self.assertEqual(ah.format_time(829.4), "00:13:49")
         self.assertEqual(ah.format_time(3661.2), "01:01:01")
@@ -165,22 +193,22 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("aquarium", enriched[0]["signals"]["vision"]["summary"]["settings"])
         self.assertEqual(enriched[0]["signals"]["thumbnails"][0]["time"], 12.0)
 
-    def test_parse_vision_response_accepts_json_and_plain_text(self):
-        parsed = ah.parse_vision_response(
-            '{"description":"A large animal near glass.","subjects":["animal"],"setting":"aquarium","actions":["swimming"],"visual_hook":"close-up","quality_note":"clear"}'
-        )
-        fallback = ah.parse_vision_response("A dark indoor aquarium scene.")
-
-        self.assertEqual(parsed["setting"], "aquarium")
-        self.assertEqual(parsed["subjects"], ["animal"])
-        self.assertEqual(fallback["description"], "A dark indoor aquarium scene.")
-
     def test_bool_value_parses_string_false(self):
         self.assertFalse(ah.bool_value("false"))
         self.assertFalse(ah.bool_value("0"))
         self.assertTrue(ah.bool_value("yes"))
 
-    def test_score_with_ollama_normalizes_model_output(self):
+    def test_parse_first_json_finds_first_object_and_ignores_preamble(self):
+        parsed = ah.parse_first_json(
+            "thinking...\n"
+            '{"summary":"usable summary","title":"title"}\n'
+            "extra text"
+        )
+
+        self.assertEqual(parsed["summary"], "usable summary")
+        self.assertEqual(parsed["title"], "title")
+
+    def test_score_with_heuristic_populates_expected_fields(self):
         candidate = {
             "id": "seg_001",
             "start": 0,
@@ -196,26 +224,12 @@ class AutoHighlightTests(unittest.TestCase):
                 "question_exclamation_count": 1,
             },
         }
-        response = (
-            "thinking...\n"
-            '{"summary":"usable summary","title":"title","tags":"hook, reaction",'
-            '"scores":{"hook":"9","fun":"bad","interaction":7,"place":0,"emotion":8,"clarity":6},'
-            '"is_standalone":"false","avoid_reason":"too confusing"}'
-        )
+        scored = ah.score_with_heuristic(candidate)
 
-        with mock.patch.object(ah, "run_capture", return_value=response):
-            scored = ah.score_with_ollama(candidate, "qwen2.5:3b")
-
-        self.assertFalse(scored["is_standalone"])
-        self.assertEqual(scored["scores"]["hook"], 9.0)
-        self.assertEqual(scored["scores"]["fun"], 0.0)
-        self.assertEqual(scored["tags"], ["hook", "reaction"])
-        self.assertEqual(scored["avoid_reason"], "too confusing")
-
-    def test_vision_response_missing_image_detection(self):
-        parsed = {"description": "No image was provided for analysis.", "setting": "", "visual_hook": "", "quality_note": ""}
-
-        self.assertTrue(ah.vision_response_missing_image(parsed))
+        self.assertEqual(scored["scoring_source"], "heuristic")
+        self.assertIn("heuristic_scores", scored)
+        self.assertIn("tags", scored)
+        self.assertGreater(scored["final_score"], 0)
 
     def test_vision_summary_influences_tags_and_scores(self):
         candidate = {
@@ -516,6 +530,92 @@ class AutoHighlightTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in selected], ["a", "c"])
 
+    def test_content_first_selection_prioritizes_visual_highlights(self):
+        def candidate(candidate_id, start, final_score, visual_event, place, quality):
+            return {
+                "id": candidate_id,
+                "start": start,
+                "end": start + 20,
+                "duration_sec": 20,
+                "final_score": final_score,
+                "is_standalone": True,
+                "avoid_reason": "none",
+                "heuristic_scores": {
+                    "visual_event_score": visual_event,
+                    "visual_interest_score": visual_event,
+                    "place_score": place,
+                    "focus_score": place,
+                    "emotion_score": 0,
+                    "keyword_score": 0,
+                },
+                "signals": {"visual_quality": quality},
+            }
+
+        scored = [
+            candidate("talk", 0, 7.0, 0.0, 0.0, {"brightness": 0.3, "contrast": 0.05, "sharpness": 0.02}),
+            candidate("view", 40, 5.0, 5.0, 6.0, {"brightness": 0.52, "contrast": 0.3, "sharpness": 0.12}),
+            candidate("weak", 80, 2.0, 0.2, 0.0, {"brightness": 0.25, "contrast": 0.02, "sharpness": 0.01}),
+        ]
+
+        selected = ah.select_segments_content_first(scored, target_duration=120)
+
+        self.assertEqual([item["id"] for item in selected], ["view"])
+
+    def test_auto_render_profile_uses_1080p_for_low_quality_selected_clips(self):
+        plan = {"selected_segments": [{"segment_id": "indoor"}, {"segment_id": "soft"}]}
+        scored = [
+            {
+                "id": "indoor",
+                "signals": {
+                    "visual_quality": {"brightness": 0.28, "contrast": 0.2, "sharpness": 0.04},
+                    "vision": {"summary": {"description": "An indoor museum hallway with dim light."}},
+                },
+            },
+            {
+                "id": "soft",
+                "signals": {
+                    "visual_quality": {"brightness": 0.36, "contrast": 0.18, "sharpness": 0.035},
+                    "vision": {"summary": {"description": "A soft tunnel scene inside a building."}},
+                },
+            },
+        ]
+
+        profile = ah.choose_auto_render_profile(plan, scored)
+
+        self.assertEqual(profile["profile"], "1080p")
+        self.assertEqual(profile["output_size"], "1920x1080")
+
+    def test_auto_render_profile_uses_4k_for_bright_outdoor_selected_clips(self):
+        plan = {"selected_segments": [{"segment_id": "lake"}, {"segment_id": "market"}, {"segment_id": "mountain"}]}
+        scored = [
+            {
+                "id": "lake",
+                "signals": {
+                    "visual_quality": {"brightness": 0.52, "contrast": 0.24, "sharpness": 0.08},
+                    "vision": {"summary": {"description": "A bright outdoor lake landscape with forest and sky."}},
+                },
+            },
+            {
+                "id": "market",
+                "signals": {
+                    "visual_quality": {"brightness": 0.47, "contrast": 0.26, "sharpness": 0.075},
+                    "vision": {"summary": {"description": "An outdoor market by a river under clear sky."}},
+                },
+            },
+            {
+                "id": "mountain",
+                "signals": {
+                    "visual_quality": {"brightness": 0.5, "contrast": 0.22, "sharpness": 0.07},
+                    "vision": {"summary": {"description": "A mountain landscape and rural hill outside."}},
+                },
+            },
+        ]
+
+        profile = ah.choose_auto_render_profile(plan, scored)
+
+        self.assertEqual(profile["profile"], "4k")
+        self.assertEqual(profile["output_size"], "3840x2160")
+
     def test_split_long_candidate_marks_event_windows(self):
         candidate = ah.Candidate("seg_000", 0, 70, " ".join(["普通對話"] * 4), {})
         segments = [
@@ -755,6 +855,413 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("thumbnails/seg_002/thumb_00.jpg", markdown)
         self.assertIn("Near Misses", markdown)
 
+    def test_compute_plan_confidence_green_for_stable_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 60,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 20, "duration_sec": 20, "final_score": 9},
+                        {"segment_id": "seg_002", "role": "highlight", "source_start": 30, "source_end": 50, "duration_sec": 20, "final_score": 8},
+                        {"segment_id": "seg_003", "role": "ending", "source_start": 70, "source_end": 90, "duration_sec": 20, "final_score": 7},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "scores": {"hook": 9, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇 你看", "signals": {}},
+                    {"id": "seg_002", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 70, "end": 90, "duration_sec": 20, "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+                    {"id": "seg_004", "start": 110, "end": 130, "duration_sec": 20, "final_score": 5, "scores": {"hook": 5, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+            self.assertTrue((tmp_path / "plan_confidence.json").exists())
+
+        self.assertEqual(confidence["status"], "green")
+        self.assertEqual(confidence["recommended_action"], "render")
+
+    def test_compute_plan_confidence_red_for_empty_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 0,
+                    "selected_segments": [],
+                },
+            )
+            ah.write_json(tmp_path / "scored_segments.json", [])
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+        self.assertEqual(confidence["status"], "red")
+        self.assertEqual(confidence["recommended_action"], "codex_rerank")
+        self.assertIn("selected_segments_zero", [rule["rule"] for rule in confidence["red_rules"]])
+
+    def test_compute_plan_confidence_yellow_for_short_uncertain_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+        self.assertEqual(confidence["status"], "yellow")
+        self.assertEqual(confidence["recommended_action"], "codex_review")
+
+    def test_build_gpt_review_packet_includes_handoff_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+
+            packet = ah.build_gpt_review_packet(tmp_path, confidence, top_candidate_limit=2)
+            self.assertTrue((tmp_path / "gpt_review_packet.json").exists())
+
+        self.assertEqual(packet["reviewer"], "codex_cli")
+        self.assertEqual(packet["confidence"]["status"], "yellow")
+        self.assertEqual(len(packet["top_candidates"]), 2)
+        self.assertEqual(packet["selected_segments"][0]["candidate"]["segment_id"], "seg_001")
+        self.assertIn("apply-review", packet["instructions"]["apply"])
+        self.assertIn("Do not edit edit_plan.json directly", packet["instructions"]["do_not"])
+
+    def test_render_review_summary_prints_yellow_handoff_steps(self):
+        out_dir = Path("/tmp/work/video1")
+        confidence = {
+            "status": "yellow",
+            "confidence_score": 0.64,
+            "recommended_action": "codex_review",
+            "triggered_rules": [{"rule": "selected_segments_under_3", "value": 2}],
+        }
+        packet = {
+            "target_duration_sec": 60,
+            "selected_duration_sec": 42,
+            "selected_segments": [
+                {
+                    "role": "hook",
+                    "candidate": {
+                        "segment_id": "seg_001",
+                        "time": "00:00:00-00:00:21",
+                        "final_score": 8.0,
+                        "title": "開場",
+                    },
+                }
+            ],
+            "near_miss_segments": [
+                {
+                    "segment_id": "seg_003",
+                    "time": "00:01:20-00:01:41",
+                    "final_score": 7.85,
+                    "title": "備選",
+                    "skip_reason": "duration budget",
+                }
+            ],
+            "review_report": {"path": "review_report.md", "contact_sheet": "review_contact_sheet.jpg"},
+        }
+
+        summary = ah.render_review_summary(out_dir, confidence, packet)
+
+        self.assertIn("Status: yellow", summary)
+        self.assertIn("selected_segments_under_3: 2", summary)
+        self.assertIn("1. seg_001 hook 00:00:00-00:00:21 score=8.0 開場", summary)
+        self.assertIn("- seg_003 00:01:20-00:01:41 score=7.85 備選 (skip: duration budget)", summary)
+        self.assertIn("codex_review_result.json", summary)
+        self.assertIn("python3 auto_highlight.py apply-review /tmp/work/video1", summary)
+
+    def test_command_review_summary_writes_packet_and_logs_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 42,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 21, "duration_sec": 21, "final_score": 8.0},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 61, "duration_sec": 21, "final_score": 7.9},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                ],
+            )
+            args = argparse.Namespace(work_dir=str(tmp_path), top_candidates=2, near_misses=1)
+
+            with mock.patch.object(ah, "log") as log:
+                ah.command_review_summary(args)
+
+            summary = log.call_args.args[0]
+
+            self.assertTrue((tmp_path / "plan_confidence.json").exists())
+            self.assertTrue((tmp_path / "gpt_review_packet.json").exists())
+            self.assertIn("Review Summary", summary)
+            self.assertIn("Status: yellow", summary)
+            self.assertIn("python3 auto_highlight.py apply-review", summary)
+
+    def test_apply_codex_review_approve_keeps_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 120})
+            plan = {
+                "version": "edit_plan_v1",
+                "source_video": "/tmp/input.mp4",
+                "output_video": "/tmp/highlight.mp4",
+                "target_duration_sec": 60,
+                "selected_duration_sec": 50,
+                "selected_segments": [
+                    {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 65, "duration_sec": 25, "clip_padding_sec": 2.5},
+                ],
+            }
+            scored = [
+                {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "結尾", "summary": "保留", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+            ]
+            ah.write_json(tmp_path / "edit_plan.json", plan)
+            ah.write_json(tmp_path / "scored_segments.json", scored)
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(tmp_path / "codex_review_result.json", {"version": "codex_review_result_v1", "decision": "approve", "reason": "current plan is good"})
+
+            applied = ah.apply_codex_review(tmp_path)
+
+            self.assertFalse(applied["changed"])
+            self.assertEqual(ah.read_json(tmp_path / "edit_plan.json"), plan)
+            self.assertFalse((tmp_path / "edit_plan.before_codex_review.json").exists())
+
+    def test_apply_codex_review_replace_and_reorder_updates_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 160})
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 50,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                        {"segment_id": "seg_002", "role": "ending", "source_start": 40, "source_end": 65, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                    {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "弱結尾", "summary": "替換", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "弱", "signals": {}},
+                    {"id": "seg_003", "start": 92.5, "end": 112.5, "duration_sec": 20, "title": "更好結尾", "summary": "更好", "final_score": 7.5, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "好", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(
+                tmp_path / "codex_review_result.json",
+                {
+                    "version": "codex_review_result_v1",
+                    "decision": "revise",
+                    "reason": "replace weak ending and put the stronger ending first",
+                    "operations": [
+                        {"op": "replace", "remove": "seg_002", "add": "seg_003"},
+                        {"op": "reorder", "segment_ids": ["seg_003", "seg_001"]},
+                    ],
+                },
+            )
+
+            applied = ah.apply_codex_review(tmp_path)
+            updated = ah.read_json(tmp_path / "edit_plan.json")
+
+            self.assertTrue(applied["changed"])
+            self.assertTrue((tmp_path / "edit_plan.before_codex_review.json").exists())
+            self.assertTrue((tmp_path / "edit_plan.gpt_reviewed.json").exists())
+            self.assertEqual([segment["segment_id"] for segment in updated["selected_segments"]], ["seg_003", "seg_001"])
+            self.assertEqual(updated["selected_segments"][0]["role"], "hook")
+            self.assertEqual(updated["selected_segments"][0]["source_start"], 90.0)
+            self.assertEqual(updated["selected_segments"][1]["source_start"], 0.0)
+            self.assertTrue((tmp_path / "codex_review_apply_result.json").exists())
+
+    def test_apply_codex_review_rejects_segment_outside_packet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            ah.write_json(tmp_path / "source.json", {"source_video": "/tmp/input.mp4", "duration_sec": 120})
+            ah.write_json(
+                tmp_path / "edit_plan.json",
+                {
+                    "version": "edit_plan_v1",
+                    "source_video": "/tmp/input.mp4",
+                    "output_video": "/tmp/highlight.mp4",
+                    "target_duration_sec": 60,
+                    "selected_duration_sec": 25,
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "role": "hook", "source_start": 0, "source_end": 25, "duration_sec": 25, "clip_padding_sec": 2.5},
+                    ],
+                },
+            )
+            ah.write_json(
+                tmp_path / "scored_segments.json",
+                [
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                ],
+            )
+            confidence = ah.compute_plan_confidence(tmp_path)
+            ah.build_gpt_review_packet(tmp_path, confidence)
+            ah.write_json(
+                tmp_path / "codex_review_result.json",
+                {"version": "codex_review_result_v1", "decision": "rerank", "selected_segment_ids": ["seg_999"], "reason": "invalid"},
+            )
+
+            with self.assertRaises(SystemExit):
+                ah.apply_codex_review(tmp_path)
+
+    def test_command_run_review_auto_green_continues_to_render(self):
+        args = self.run_args(review_mode="auto")
+        confidence = {"status": "green", "confidence_score": 0.9, "recommended_action": "render"}
+
+        with (
+            mock.patch.object(ah, "command_prepare") as prepare,
+            mock.patch.object(ah, "command_score") as score,
+            mock.patch.object(ah, "command_plan") as plan,
+            mock.patch.object(ah, "command_review_gate", return_value=confidence) as review_gate,
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            ah.command_run(args)
+
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(score.call_count, 1)
+        self.assertEqual(plan.call_count, 1)
+        self.assertEqual(review_gate.call_count, 1)
+        self.assertEqual(render.call_count, 1)
+
+    def test_command_run_review_auto_yellow_stops_before_render_and_mentions_apply_review(self):
+        args = self.run_args(review_mode="auto", out="work/yellow")
+        confidence = {"status": "yellow", "confidence_score": 0.64, "recommended_action": "codex_review"}
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate", return_value=confidence),
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                ah.command_run(args)
+
+        message = str(raised.exception)
+        self.assertIn("gpt_review_packet.json", message)
+        self.assertIn("codex_review_result.json", message)
+        self.assertIn("apply-review work/yellow", message)
+        self.assertNotIn("update edit_plan.json", message)
+        self.assertEqual(render.call_count, 0)
+
+    def test_command_run_review_always_stops_before_render_even_when_green(self):
+        args = self.run_args(review_mode="always")
+        confidence = {"status": "green", "confidence_score": 0.91, "recommended_action": "render"}
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate", return_value=confidence),
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                ah.command_run(args)
+
+        self.assertIn("apply-review work/video1", str(raised.exception))
+        self.assertEqual(render.call_count, 0)
+
+    def test_command_run_review_off_skips_gate_and_renders(self):
+        args = self.run_args(review_mode="off")
+
+        with (
+            mock.patch.object(ah, "command_prepare"),
+            mock.patch.object(ah, "command_score"),
+            mock.patch.object(ah, "command_plan"),
+            mock.patch.object(ah, "command_review_gate") as review_gate,
+            mock.patch.object(ah, "command_render") as render,
+        ):
+            ah.command_run(args)
+
+        self.assertEqual(review_gate.call_count, 0)
+        self.assertEqual(render.call_count, 1)
+
+    def test_command_apply_review_passes_custom_review_result_path(self):
+        args = argparse.Namespace(work_dir="/tmp/work", review_result="/tmp/custom_review.json")
+        applied = {"decision": "revise", "changed": True}
+
+        with (
+            mock.patch.object(ah, "apply_codex_review", return_value=applied) as apply_review,
+            mock.patch.object(ah, "log"),
+        ):
+            ah.command_apply_review(args)
+
+        self.assertEqual(apply_review.call_args.args[0], Path("/tmp/work"))
+        self.assertEqual(apply_review.call_args.args[1], Path("/tmp/custom_review.json"))
+
     def test_contact_sheet_inputs_uses_middle_thumbnail_for_selected_and_near_miss(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
@@ -894,6 +1401,92 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertEqual(args.work_dir, "work/sample_video")
         self.assertEqual(args.func, ah.command_report)
 
+    def test_profile_keywords_are_used_for_candidate_generation(self):
+        transcript = {
+            "duration_sec": 40,
+            "segments": [
+                {"start": 10, "end": 13, "text": "這個展覽入口很漂亮"},
+                {"start": 25, "end": 27, "text": "普通對話"},
+            ],
+        }
+        profile = ah.load_profile("travel")
+
+        candidates = ah.generate_candidates_from_transcript(transcript, profile=profile)
+
+        self.assertTrue(candidates)
+        self.assertIn("入口", candidates[0]["signals"]["profile_keywords"])
+
+    def test_profile_scoring_adds_auditable_boost(self):
+        candidate = {
+            "id": "seg_001",
+            "final_score": 4.0,
+            "tags": ["視覺地點"],
+            "heuristic_scores": {"place_score": 6.0, "visual_event_score": 2.0, "focus_score": 3.0},
+            "signals": {"profile_keywords": ["入口"], "visual_quality": {"brightness": 0.52, "contrast": 0.2, "sharpness": 0.08}},
+        }
+
+        scored = ah.apply_profile_scoring([candidate], ah.load_profile("travel"))
+
+        self.assertGreater(scored[0]["final_score"], 4.0)
+        self.assertEqual(scored[0]["profile_adjusted_from"], 4.0)
+        self.assertEqual(scored[0]["profile_name"], "travel")
+
+    def test_subtitle_cues_map_source_times_to_output_timeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out_dir = Path(directory)
+            ah.write_json(
+                out_dir / "edit_plan.json",
+                {
+                    "selected_segments": [
+                        {"segment_id": "seg_001", "source_start": 10, "source_end": 20},
+                        {"segment_id": "seg_002", "source_start": 40, "source_end": 45},
+                    ]
+                },
+            )
+            ah.write_json(
+                out_dir / "transcript.json",
+                {
+                    "segments": [
+                        {"start": 12, "end": 14, "text": "第一段"},
+                        {"start": 41, "end": 42, "text": "第二段"},
+                    ]
+                },
+            )
+
+            cues = ah.subtitle_cues_for_plan(out_dir)
+
+        self.assertEqual(cues[0]["start"], 2.0)
+        self.assertEqual(cues[0]["end"], 4.0)
+        self.assertEqual(cues[1]["start"], 11.0)
+        self.assertEqual(cues[1]["end"], 12.0)
+
+    def test_doctor_warns_on_stale_html_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out_dir = Path(directory)
+            source_video = out_dir / "source.mp4"
+            source_video.write_bytes(b"video")
+            ah.write_json(out_dir / "source.json", {"source_video": str(source_video), "duration_sec": 20, "fingerprint": ah.source_fingerprint(source_video)})
+            ah.write_json(out_dir / "transcript.json", {"segments": []})
+            ah.write_json(out_dir / "candidates.json", [])
+            ah.write_json(out_dir / "scored_segments.json", [])
+            ah.write_json(out_dir / "edit_plan.json", {"selected_segments": []})
+            report_path = out_dir / "review_report.json"
+            html_path = out_dir / "review_report.html"
+            report_path.write_text("{}", encoding="utf-8")
+            html_path.write_text("<html></html>", encoding="utf-8")
+            os.utime(html_path, (1000, 1000))
+            os.utime(report_path, (2000, 2000))
+
+            report = ah.doctor_check(out_dir)
+
+        fingerprint_checks = [check for check in report["checks"] if check["name"] == "source_fingerprint"]
+        self.assertTrue(fingerprint_checks)
+        self.assertEqual(fingerprint_checks[0]["status"], "ok")
+        self.assertEqual(fingerprint_checks[0]["detail"], "")
+        stale_checks = [check for check in report["checks"] if check["name"] == "review_report.html"]
+        self.assertTrue(stale_checks)
+        self.assertEqual(stale_checks[0]["status"], "warn")
+
     def test_render_defaults_compress_to_phone_resolution(self):
         parser = ah.build_parser()
 
@@ -933,6 +1526,31 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("-b:v", args)
         self.assertIn("3500k", args)
         self.assertNotIn("-crf", args)
+
+    def test_render_writes_output_inside_current_work_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out_dir = root / "current"
+            stale_dir = root / "stale"
+            out_dir.mkdir()
+            source_video = root / "source.mp4"
+            source_video.write_bytes(b"video")
+            ah.write_json(
+                out_dir / "edit_plan.json",
+                {
+                    "source_video": str(source_video),
+                    "output_video": str(stale_dir / "output" / "highlight.mp4"),
+                    "selected_segments": [{"source_start": 0, "source_end": 1}],
+                },
+            )
+            settings = ah.RenderSettings(output_size="640x360", crf=35, preset="veryfast", audio_bitrate="96k")
+
+            with mock.patch.object(ah, "require_tool"), mock.patch.object(ah, "run_command") as run_command:
+                ah.render_edit_plan(out_dir, settings)
+
+            concat_command = run_command.call_args_list[-1].args[0]
+
+        self.assertEqual(Path(concat_command[-1]), out_dir / "output" / "highlight.mp4")
 
     def test_output_size_arg_rejects_invalid_size(self):
         with self.assertRaises(Exception):
