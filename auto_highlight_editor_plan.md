@@ -20,7 +20,7 @@ Then assemble selected clips into a new highlight video.
 The key design principle is:
 
 > Use cheap local tools to reduce the video into structured metadata, then use
-> LLMs only on small candidate segments.
+> Codex only on compact review artifacts when the confidence gate asks for it.
 
 ## Available Tools
 
@@ -37,21 +37,19 @@ Current target environment:
   - run Python script and manage dependencies
 - `faster-whisper`
   - local transcription with timestamps
-- `ollama + qwen`
-  - cheap local segment scoring, tagging, summarization
 - optional `codex cli`
   - complex planning, debugging, edit plan refinement, file/schema edits
 
 ## Design Philosophy
 
-Do not ask an LLM to watch the whole video.
+Do not ask Codex to watch the whole video.
 
 Instead:
 
 1. Convert video into transcript, timestamps, audio signals, and thumbnails.
 2. Use rules to generate candidate segments.
-3. Use Ollama for repetitive per-segment scoring.
-4. Use Codex CLI only for complex global decisions if needed.
+3. Use deterministic local heuristics for repetitive per-segment scoring.
+4. Use the main Codex CLI agent (`gpt-5.5`) only for complex global decisions if needed.
 5. Render final video with ffmpeg.
 
 ## Recommended MVP
@@ -67,7 +65,7 @@ It should:
 1. Extract audio with ffmpeg.
 2. Transcribe with faster-whisper.
 3. Generate candidate clips using transcript rules.
-4. Optionally score candidates with Ollama.
+4. Score candidates with local heuristics.
 5. Pick top segments.
 6. Create `edit_plan.json`.
 7. Render `highlight.mp4` with ffmpeg.
@@ -87,7 +85,7 @@ rule-based candidate generation
   ↓
 audio/text heuristic scoring
   ↓
-ollama local scoring, optional
+heuristic local scoring
   ↓
 dedupe and select clips
   ↓
@@ -127,7 +125,7 @@ be split into resumable steps:
 
 ```bash
 uv run python auto_highlight.py prepare input.mp4 --out work/video1
-uv run python auto_highlight.py score work/video1 --planner ollama --model qwen2.5:3b
+uv run python auto_highlight.py score work/video1
 uv run python auto_highlight.py plan work/video1 --target-duration 180
 uv run python auto_highlight.py render work/video1
 ```
@@ -200,7 +198,7 @@ Score each window with heuristics:
 - emotional words
 - place-related words
 
-Keep top candidates before calling Ollama.
+Keep top candidates before any heavier review step.
 
 ### Merge Nearby Candidates
 
@@ -220,7 +218,7 @@ maximum duration: 75 seconds
 
 ## Heuristic Scoring
 
-Each candidate should get a rule score before LLM scoring.
+Each candidate should get a rule score from deterministic local signals.
 
 Suggested fields:
 
@@ -236,13 +234,13 @@ Suggested fields:
 }
 ```
 
-This lets the pipeline work even without Ollama.
+This lets the pipeline work entirely offline.
 
-## Ollama Segment Scoring
+## Local Segment Scoring
 
-Ollama should handle repetitive local judgments.
+Local heuristics should handle repetitive segment judgments.
 
-Good tasks for Ollama:
+Good tasks for the local scoring stage:
 
 - summarize each candidate
 - classify tags
@@ -251,10 +249,10 @@ Good tasks for Ollama:
 - generate a short title
 - provide avoid reasons
 
-Ollama should not make the final global edit unless Codex is unavailable or
-the user explicitly wants full local mode.
+The scoring stage should not make the final global edit unless Codex is unavailable
+or the user explicitly wants a fully local flow.
 
-### Ollama Prompt Shape
+### Local Scoring Prompt Shape
 
 Send one candidate or a small batch at a time:
 
@@ -294,8 +292,9 @@ Expected response:
 }
 ```
 
-The script should validate JSON and fall back to heuristic scores if parsing
-fails.
+The script should write this JSON deterministically from local scoring fields.
+If a signal is unavailable, keep the corresponding score at its heuristic default
+and record the reason in the score audit fields.
 
 ## Final Score
 
@@ -400,6 +399,10 @@ Use Codex CLI when:
 - selected clips need global ordering
 - the user wants to keep or reject specific segments
 
+Simple bounded checks, summaries, and artifact scans can be delegated to
+`gpt-5.4-mini` subagents while the main `gpt-5.5` agent keeps the editorial
+decision.
+
 Do not require Codex CLI for the default one-command script.
 
 ### Codex-Friendly Files
@@ -476,7 +479,7 @@ Implemented as of 2026-07-01:
 - resumable artifacts under `work/<video-name>/`
 - transcript-based candidate generation with fallback speech clusters
 - optional visual analysis, OCR, thumbnails, visual subclips, and project focus inference
-- heuristic and optional Ollama text scoring
+- heuristic text scoring
 - `content-first` selection mode and auto render quality selection
 - Scheme C confidence gate, Codex review packet, and `apply-review`
 - highlight style profiles via `--profile` / `--profile-file`
@@ -490,7 +493,7 @@ After MVP works:
 
 - add audio RMS and volume spike detection
 - refine cut points using nearby silence
-- add better Qwen rubric scoring
+- add richer rubric-based scoring
 - support `--keep seg_001,seg_003`
 - support `--reject seg_010`
 - support `--burn-subtitles` for rendered subtitle video output
@@ -514,9 +517,7 @@ Desired command:
 ```bash
 uv run python auto_highlight.py run /path/to/input.mp4 \
   --out work/video1 \
-  --target-duration 180 \
-  --model qwen2.5:3b \
-  --planner ollama
+  --target-duration 180
 ```
 
 Expected outputs:
@@ -534,16 +535,16 @@ work/video1/subtitles.vtt
 work/video1/output/highlight.mp4
 ```
 
-The script should still work if Ollama is unavailable:
+The script should still work with local heuristics only:
 
 ```bash
-uv run python auto_highlight.py run input.mp4 --out work/video1 --planner heuristic
+uv run python auto_highlight.py run input.mp4 --out work/video1
 ```
 
 ## Implementation Notes
 
 - Prefer plain Python standard library where possible.
-- Use subprocess for ffmpeg and Ollama calls.
+- Use subprocess for ffmpeg calls.
 - Store every intermediate JSON file.
 - Make each step idempotent when practical.
 - Print clear progress logs.

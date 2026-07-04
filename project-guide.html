@@ -983,15 +983,15 @@
             </div>
             <div class="mini-art">
               <div class="terminal-art" aria-label="終端機指令示意">
-                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto<br>
+                $ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto<br>
                 → 讀影片<br>
                 → 找畫面亮點<br>
                 → 輸出 highlight.mp4
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto">複製</button>
-              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --vision-model qwen2.5vl:7b --selection-mode content-first --quality-mode auto --review-mode auto</code></pre>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto">複製</button>
+              <pre><code>uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel --visuals --selection-mode content-first --quality-mode auto --review-mode auto</code></pre>
             </div>
           </article>
 
@@ -1012,10 +1012,10 @@
               </div>
             </div>
             <div class="code-box">
-              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1 --profile travel&#10;uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b&#10;uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py subtitles work/video1&#10;uv run python auto_highlight.py doctor work/video1&#10;uv run python auto_highlight.py render work/video1 --quality-mode auto --subtitles">複製</button>
+              <button class="copy-btn" type="button" data-copy="uv run python auto_highlight.py prepare input.mp4 --out work/video1 --profile travel&#10;uv run python auto_highlight.py analyze-visuals work/video1&#10;uv run python auto_highlight.py score work/video1&#10;uv run python auto_highlight.py plan work/video1 --selection-mode content-first&#10;uv run python auto_highlight.py review-gate work/video1&#10;uv run python auto_highlight.py review-summary work/video1&#10;uv run python auto_highlight.py subtitles work/video1&#10;uv run python auto_highlight.py doctor work/video1&#10;uv run python auto_highlight.py render work/video1 --quality-mode auto --subtitles">複製</button>
               <pre><code>uv run python auto_highlight.py prepare input.mp4 --out work/video1 --profile travel
-uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
-uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
+uv run python auto_highlight.py analyze-visuals work/video1
+uv run python auto_highlight.py score work/video1
 uv run python auto_highlight.py plan work/video1 --selection-mode content-first
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py review-summary work/video1
@@ -1094,7 +1094,7 @@ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel
       <section class="section" id="install">
         <h2>事前需要安裝哪些工具</h2>
         <p class="section-intro">
-          這個專案像一個小隊伍。Python 負責指揮，ffmpeg 負責處理影片，faster-whisper 負責把聲音變文字，Ollama 是可選的本機 AI 評審。
+          這個專案像一個小隊伍。Python 負責指揮，ffmpeg 負責處理影片，faster-whisper 負責把聲音變文字，預設流程則維持 deterministic / heuristic，不需要本機 LLM。
         </p>
 
         <div class="install-layout">
@@ -1123,8 +1123,8 @@ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel
             <article class="tool-card">
               <span class="icon-box" aria-hidden="true">AI</span>
               <div>
-                <strong>Ollama，可選</strong>
-                <p class="muted">如果你想用本機模型幫文字打分或描述縮圖，可以安裝它。</p>
+                <strong>不需本機 LLM</strong>
+                <p class="muted">預設流程走 deterministic / heuristic；Codex CLI 會在需要時用 gpt-5.4-mini 子代理處理簡單側任務，複雜審稿則交給主 Codex agent（gpt-5.5）。</p>
               </div>
             </article>
           </div>
@@ -1144,13 +1144,7 @@ uv run python auto_highlight.py run input.mp4 --out work/video1 --profile travel
                 <pre><code>brew install ffmpeg uv
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可到官方網站下載，或用 Homebrew 安裝。<code>qwen3:1.7b</code> 用來看文字片段，<code>qwen2.5vl:7b</code> 用來描述縮圖。</p>
-              <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="brew install ollama&#10;ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>brew install ollama
-ollama pull qwen3:1.7b
-ollama pull qwen2.5vl:7b</code></pre>
-              </div>
+              <p class="muted">這個流程不需要安裝本機 LLM。縮圖與片段判斷留給規則流程與 Codex 審稿。</p>
             </div>
 
             <div class="tab-panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
@@ -1162,11 +1156,10 @@ ollama pull qwen2.5vl:7b</code></pre>
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 可以從官方網站下載 Windows 版，裝好後再拉模型。<code>qwen3:1.7b</code> 看文字，<code>qwen2.5vl:7b</code> 看縮圖。</p>
+              <p class="muted">Windows 不需要本機 LLM。先安裝 ffmpeg 和 uv 即可。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>ollama pull qwen3:1.7b
-ollama pull qwen2.5vl:7b</code></pre>
+                <button class="copy-btn" type="button" data-copy="uv sync --extra transcribe">複製</button>
+                <pre><code>uv sync --extra transcribe</code></pre>
               </div>
             </div>
 
@@ -1180,12 +1173,13 @@ sudo apt install ffmpeg python3 python3-pip
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra transcribe</code></pre>
               </div>
-              <p class="muted">Ollama 是可選項，需要本機模型時再裝。文字打分用 <code>qwen3:1.7b</code>，縮圖描述用 <code>qwen2.5vl:7b</code>。</p>
+              <p class="muted">Linux 也不需要本機 LLM。這個專案預設走 deterministic / heuristic，必要時由 gpt-5.4-mini 子代理處理簡單側任務。</p>
               <div class="code-box">
-                <button class="copy-btn" type="button" data-copy="curl -fsSL https://ollama.com/install.sh | sh&#10;ollama pull qwen3:1.7b&#10;ollama pull qwen2.5vl:7b">複製</button>
-                <pre><code>curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:1.7b
-ollama pull qwen2.5vl:7b</code></pre>
+                <button class="copy-btn" type="button" data-copy="sudo apt update&#10;sudo apt install ffmpeg python3 python3-pip&#10;curl -LsSf https://astral.sh/uv/install.sh | sh&#10;uv sync --extra transcribe">複製</button>
+                <pre><code>sudo apt update
+sudo apt install ffmpeg python3 python3-pip
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --extra transcribe</code></pre>
               </div>
             </div>
           </div>
@@ -1211,9 +1205,9 @@ ollama pull qwen2.5vl:7b</code></pre>
               <td data-label="看到什麼代表成功">出現 uv 的版本號。</td>
             </tr>
             <tr>
-              <td data-label="檢查項目">Ollama，可選</td>
-              <td data-label="指令"><code>ollama list</code></td>
-              <td data-label="看到什麼代表成功">能列出模型，或至少沒有找不到指令。</td>
+              <td data-label="檢查項目">不需本機 LLM</td>
+              <td data-label="指令"><code>uv sync --extra transcribe</code></td>
+              <td data-label="看到什麼代表成功">依賴安裝完成，沒有卡在額外下載。</td>
             </tr>
           </tbody>
         </table>
@@ -1270,7 +1264,7 @@ ollama pull qwen2.5vl:7b</code></pre>
                 </svg>
               </span>
               <h3>5. 幫片段打分</h3>
-              <p class="muted">看關鍵字、說話密度、情緒字、地點字，也可用 qwen3:1.7b 等本機模型補充判斷；profile 會留下可追蹤的分數加成。</p>
+              <p class="muted">看關鍵字、說話密度、情緒字、地點字，預設走 deterministic / heuristic；複雜審稿交給主 Codex agent（gpt-5.5），簡單側任務可派 gpt-5.4-mini 子代理，profile 會留下可追蹤的分數加成。</p>
             </article>
             <article class="flow-step">
               <span class="flow-icon" aria-hidden="true">

@@ -18,11 +18,7 @@ class AutoHighlightTests(unittest.TestCase):
             "visuals": False,
             "thumbnail_count": 3,
             "ocr_languages": "chi_tra+eng",
-            "vision_model": "",
-            "ollama_url": "http://127.0.0.1:11434",
             "output_size": "1080x1920",
-            "planner": "heuristic",
-            "model": ah.DEFAULT_TEXT_MODEL,
             "target_duration": 60,
             "retention_ratio": ah.DEFAULT_TARGET_RETENTION_RATIO,
             "clip_padding": ah.DEFAULT_CLIP_PADDING,
@@ -197,22 +193,22 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("aquarium", enriched[0]["signals"]["vision"]["summary"]["settings"])
         self.assertEqual(enriched[0]["signals"]["thumbnails"][0]["time"], 12.0)
 
-    def test_parse_vision_response_accepts_json_and_plain_text(self):
-        parsed = ah.parse_vision_response(
-            '{"description":"A large animal near glass.","subjects":["animal"],"setting":"aquarium","actions":["swimming"],"visual_hook":"close-up","quality_note":"clear"}'
-        )
-        fallback = ah.parse_vision_response("A dark indoor aquarium scene.")
-
-        self.assertEqual(parsed["setting"], "aquarium")
-        self.assertEqual(parsed["subjects"], ["animal"])
-        self.assertEqual(fallback["description"], "A dark indoor aquarium scene.")
-
     def test_bool_value_parses_string_false(self):
         self.assertFalse(ah.bool_value("false"))
         self.assertFalse(ah.bool_value("0"))
         self.assertTrue(ah.bool_value("yes"))
 
-    def test_score_with_ollama_normalizes_model_output(self):
+    def test_parse_first_json_finds_first_object_and_ignores_preamble(self):
+        parsed = ah.parse_first_json(
+            "thinking...\n"
+            '{"summary":"usable summary","title":"title"}\n'
+            "extra text"
+        )
+
+        self.assertEqual(parsed["summary"], "usable summary")
+        self.assertEqual(parsed["title"], "title")
+
+    def test_score_with_heuristic_populates_expected_fields(self):
         candidate = {
             "id": "seg_001",
             "start": 0,
@@ -228,26 +224,12 @@ class AutoHighlightTests(unittest.TestCase):
                 "question_exclamation_count": 1,
             },
         }
-        response = (
-            "thinking...\n"
-            '{"summary":"usable summary","title":"title","tags":"hook, reaction",'
-            '"scores":{"hook":"9","fun":"bad","interaction":7,"place":0,"emotion":8,"clarity":6},'
-            '"is_standalone":"false","avoid_reason":"too confusing"}'
-        )
+        scored = ah.score_with_heuristic(candidate)
 
-        with mock.patch.object(ah, "run_ollama_chat_text", return_value=response):
-            scored = ah.score_with_ollama(candidate, "qwen3:1.7b")
-
-        self.assertFalse(scored["is_standalone"])
-        self.assertEqual(scored["scores"]["hook"], 9.0)
-        self.assertEqual(scored["scores"]["fun"], 0.0)
-        self.assertEqual(scored["tags"], ["hook", "reaction"])
-        self.assertEqual(scored["avoid_reason"], "too confusing")
-
-    def test_vision_response_missing_image_detection(self):
-        parsed = {"description": "No image was provided for analysis.", "setting": "", "visual_hook": "", "quality_note": ""}
-
-        self.assertTrue(ah.vision_response_missing_image(parsed))
+        self.assertEqual(scored["scoring_source"], "heuristic")
+        self.assertIn("heuristic_scores", scored)
+        self.assertIn("tags", scored)
+        self.assertGreater(scored["final_score"], 0)
 
     def test_vision_summary_influences_tags_and_scores(self):
         candidate = {
@@ -894,10 +876,10 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "scores": {"hook": 9, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇 你看", "signals": {}},
-                    {"id": "seg_002", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
-                    {"id": "seg_003", "start": 70, "end": 90, "duration_sec": 20, "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
-                    {"id": "seg_004", "start": 110, "end": 130, "duration_sec": 20, "final_score": 5, "scores": {"hook": 5, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                    {"id": "seg_001", "start": 0, "end": 20, "duration_sec": 20, "final_score": 9, "scores": {"hook": 9, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇 你看", "signals": {}},
+                    {"id": "seg_002", "start": 30, "end": 50, "duration_sec": 20, "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 70, "end": 90, "duration_sec": 20, "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+                    {"id": "seg_004", "start": 110, "end": 130, "duration_sec": 20, "final_score": 5, "scores": {"hook": 5, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
                 ],
             )
 
@@ -949,9 +931,9 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
-                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
-                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
                 ],
             )
 
@@ -980,9 +962,9 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}},
-                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
-                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {"thumbnails": [{"path": "thumbnails/seg_001/thumb_00.jpg"}]}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
                 ],
             )
             confidence = ah.compute_plan_confidence(tmp_path)
@@ -1060,9 +1042,9 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
-                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
-                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
+                    {"id": "seg_001", "start": 0, "end": 21, "duration_sec": 21, "title": "開場", "summary": "強開場", "final_score": 8.0, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "哇", "signals": {}},
+                    {"id": "seg_002", "start": 40, "end": 61, "duration_sec": 21, "title": "結尾", "summary": "可當結尾", "final_score": 7.9, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "你好", "signals": {}},
+                    {"id": "seg_003", "start": 80, "end": 101, "duration_sec": 21, "title": "備選", "summary": "接近入選", "final_score": 7.85, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "備選", "signals": {}},
                 ],
             )
             args = argparse.Namespace(work_dir=str(tmp_path), top_candidates=2, near_misses=1)
@@ -1094,8 +1076,8 @@ class AutoHighlightTests(unittest.TestCase):
                 ],
             }
             scored = [
-                {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
-                {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "結尾", "summary": "保留", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
+                {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "結尾", "summary": "保留", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "結尾", "signals": {}},
             ]
             ah.write_json(tmp_path / "edit_plan.json", plan)
             ah.write_json(tmp_path / "scored_segments.json", scored)
@@ -1130,9 +1112,9 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
-                    {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "弱結尾", "summary": "替換", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "弱", "signals": {}},
-                    {"id": "seg_003", "start": 92.5, "end": 112.5, "duration_sec": 20, "title": "更好結尾", "summary": "更好", "final_score": 7.5, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "好", "signals": {}},
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                    {"id": "seg_002", "start": 42.5, "end": 62.5, "duration_sec": 20, "title": "弱結尾", "summary": "替換", "final_score": 7, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "弱", "signals": {}},
+                    {"id": "seg_003", "start": 92.5, "end": 112.5, "duration_sec": 20, "title": "更好結尾", "summary": "更好", "final_score": 7.5, "scores": {"hook": 7, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "好", "signals": {}},
                 ],
             )
             confidence = ah.compute_plan_confidence(tmp_path)
@@ -1158,6 +1140,8 @@ class AutoHighlightTests(unittest.TestCase):
             self.assertTrue((tmp_path / "edit_plan.gpt_reviewed.json").exists())
             self.assertEqual([segment["segment_id"] for segment in updated["selected_segments"]], ["seg_003", "seg_001"])
             self.assertEqual(updated["selected_segments"][0]["role"], "hook")
+            self.assertEqual(updated["selected_segments"][0]["source_start"], 90.0)
+            self.assertEqual(updated["selected_segments"][1]["source_start"], 0.0)
             self.assertTrue((tmp_path / "codex_review_apply_result.json").exists())
 
     def test_apply_codex_review_rejects_segment_outside_packet(self):
@@ -1180,7 +1164,7 @@ class AutoHighlightTests(unittest.TestCase):
             ah.write_json(
                 tmp_path / "scored_segments.json",
                 [
-                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "ollama", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
+                    {"id": "seg_001", "start": 2.5, "end": 22.5, "duration_sec": 20, "title": "開場", "summary": "保留", "final_score": 8, "scores": {"hook": 8, "clarity": 8}, "scoring_source": "heuristic", "is_standalone": True, "avoid_reason": "none", "transcript": "開場", "signals": {}},
                 ],
             )
             confidence = ah.compute_plan_confidence(tmp_path)
@@ -1495,6 +1479,10 @@ class AutoHighlightTests(unittest.TestCase):
 
             report = ah.doctor_check(out_dir)
 
+        fingerprint_checks = [check for check in report["checks"] if check["name"] == "source_fingerprint"]
+        self.assertTrue(fingerprint_checks)
+        self.assertEqual(fingerprint_checks[0]["status"], "ok")
+        self.assertEqual(fingerprint_checks[0]["detail"], "")
         stale_checks = [check for check in report["checks"] if check["name"] == "review_report.html"]
         self.assertTrue(stale_checks)
         self.assertEqual(stale_checks[0]["status"], "warn")

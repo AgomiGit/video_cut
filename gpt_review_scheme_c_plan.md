@@ -1,4 +1,4 @@
-# Implementation Plan: Scheme C Plan Confidence + GPT Review
+# Implementation Plan: Scheme C Plan Confidence + Codex Review
 
 ## Context
 
@@ -12,7 +12,7 @@ prepare
 => render
 ```
 
-The current implementation does not call GPT/OpenAI. Local scoring is done by heuristics or Ollama, and rendering is done by ffmpeg from `edit_plan.json`.
+The current implementation does not call a separate reviewer service. Local scoring is done by heuristics, and rendering is done by ffmpeg from `edit_plan.json`.
 
 The desired design is Scheme C:
 
@@ -23,14 +23,14 @@ prepare
 => plan
 => confidence-gate
    green: render directly
-   yellow: GPT-5.5 reviews the current plan and may make small edits
-   red: GPT-5.5 reranks top candidates and may rebuild the plan
+   yellow: main Codex CLI agent (gpt-5.5) reviews the current plan and may make small edits
+   red: main Codex CLI agent (gpt-5.5) reranks top candidates and may rebuild the plan
 => render
 ```
 
-GPT should not decide whether GPT is needed. A local deterministic confidence gate decides `green`, `yellow`, or `red`.
+Codex should not decide whether Codex review is needed. A local deterministic confidence gate decides `green`, `yellow`, or `red`.
 
-The user normally runs this project through Codex CLI and does not want to configure a separate LLM provider API key. Therefore, when this document says GPT-5.5 review, the practical default is: the current Codex CLI agent reads the generated artifacts and performs the review/rerank step itself. External provider support can be added later, but it must not be required for the user's normal workflow.
+The user normally runs this project through Codex CLI and wants the current main agent (`gpt-5.5`) to perform the review/rerank step itself. Simple bounded side checks can be delegated to `gpt-5.4-mini` subagents. Additional reviewer-service integrations are out of scope for this plan.
 
 ## Implementation Status
 
@@ -40,7 +40,7 @@ Implemented first slice:
 - `plan_confidence.json`.
 - `gpt_review_packet.json`.
 - `run --review-mode auto|always|off`.
-- Codex CLI handoff for yellow/red without requiring an external API key.
+- Codex CLI handoff for yellow/red.
 - `apply-review` command.
 - Validation and application of `codex_review_result.json`.
 - Backup of the previous plan to `edit_plan.before_codex_review.json` before reviewed changes are applied.
@@ -52,22 +52,20 @@ Implemented first slice:
 
 Not implemented yet:
 
-- External OpenAI/GPT provider integration.
-- Automatic application of a remote GPT response.
-- Remote-provider response fetching.
+- Automatic application of a review response from local artifacts.
 - Burned-in subtitles during render.
 
 ## Architecture Decisions
 
 - Insert the new logic after `command_plan()` and before `command_render()`.
-- Keep `render` unaware of GPT. It should continue to read only `edit_plan.json`.
-- Keep local-first behavior as the default. GPT review should only run when explicitly enabled.
+- Keep `render` unaware of review. It should continue to read only `edit_plan.json`.
+- Keep local-first behavior as the default. Codex review should only run when the confidence gate requests it.
 - Write all intermediate artifacts so decisions are auditable.
-- GPT should receive a compact review packet, not the full raw transcript or entire media.
+- Codex should receive a compact review packet, not the full raw transcript or entire media.
 - Yellow mode should be constrained: approve, reorder, replace with near miss, or remove weak segment.
 - Red mode can rebuild the plan, but only from a bounded candidate set.
-- Codex CLI handoff should be supported even before any external GPT API provider exists.
-- Do not ask the user for an API key during normal Codex CLI operation; use local artifacts and the current agent's reasoning for yellow/red review.
+- Codex CLI handoff should be supported without any reviewer service.
+- Keep the default path self-contained and driven by local artifacts plus the current agent's reasoning for yellow/red review.
 
 ## Planned Artifacts
 
@@ -91,7 +89,7 @@ Acceptance criteria:
 
 - Writes `plan_confidence.json`.
 - Includes `status`, `confidence_score`, `triggered_rules`, and `recommended_action`.
-- Does not require GPT, OpenAI, or network access.
+- Does not require remote review or network access.
 - Can be tested with synthetic plans and scored segments.
 
 Initial red rules:
@@ -162,14 +160,14 @@ Files likely touched:
 ## Checkpoint 1
 
 - `review-gate` runs on an existing work directory.
-- No GPT provider is needed.
+- No separate reviewer service is needed.
 - Existing `plan` and `render` behavior remains unchanged.
 
-## Phase 2: GPT Review Packet
+## Phase 2: Review Packet
 
-### Task 3: Build GPT Review Packet
+### Task 3: Build Review Packet
 
-Description: Create a compact packet with only the information GPT needs to review or rerank the plan.
+Description: Create a compact packet with only the information a reviewer needs to review or rerank the plan.
 
 Packet should include:
 
@@ -196,27 +194,19 @@ Files likely touched:
 - `auto_highlight.py`
 - `tests/test_review_packet.py`
 
-## Phase 3: GPT-5.5 Yellow Review
+## Phase 3: Yellow Review
 
-For the user's normal workflow, this phase should first support Codex CLI manual/agent review. A remote OpenAI provider is optional and should not block the feature.
+For the user's normal workflow, this phase should support Codex CLI manual/agent review.
 
-### Task 4: Add GPT Review Provider Boundary
+### Task 4: Add Review Boundary
 
-Description: Add a provider boundary for remote GPT review without mixing it into scoring or rendering.
-
-Proposed flags:
-
-```bash
---review-provider openai
---review-model gpt-5.5
-```
+Description: Add a boundary for reviewed plan edits without mixing it into scoring or rendering.
 
 Acceptance criteria:
 
-- Missing API credentials fail clearly.
-- Response must be valid JSON.
-- Provider can be mocked in tests.
-- No silent fallback to local heuristics when GPT review was explicitly requested.
+- Review input and output are valid JSON.
+- Boundary can be mocked in tests.
+- No silent fallback to local heuristics when review was explicitly requested.
 
 Files likely touched:
 
@@ -226,14 +216,14 @@ Files likely touched:
 
 ### Task 4A: Add Codex CLI Review Handoff
 
-Description: Ensure yellow/red review can be completed by the Codex CLI agent without an external API key.
+Description: Ensure yellow/red review can be completed by the Codex CLI agent without any external service dependency.
 
 Acceptance criteria:
 
 - `plan_confidence.json` and `gpt_review_packet.json` contain enough information for a Codex CLI agent to review manually.
 - Instructions in `AGENTS.md` tell future agents how to handle green, yellow, and red.
 - The agent can write `codex_review_result.json` and update `edit_plan.json` after backing up the original plan.
-- No external LLM provider is required for this path.
+- No external service is required for this path.
 
 Files likely touched:
 
@@ -243,7 +233,7 @@ Files likely touched:
 
 ### Task 5: Apply Yellow Review Results
 
-Description: Let GPT make constrained edits to the current plan.
+Description: Let the reviewer make constrained edits to the current plan.
 
 Allowed operations:
 
@@ -257,8 +247,8 @@ remove weak segment
 Acceptance criteria:
 
 - Writes `gpt_review_result.json`.
-- Backs up the original plan to `edit_plan.before_gpt.json`.
-- Writes the reviewed plan to `edit_plan.json` and optionally `edit_plan.gpt_reviewed.json`.
+- Backs up the original plan to `edit_plan.before_review.json`.
+- Writes the reviewed plan to `edit_plan.json` and optionally `edit_plan.reviewed.json`.
 - Rejects unknown segment IDs.
 - Rejects edits outside the provided packet.
 
@@ -269,21 +259,21 @@ Files likely touched:
 
 ## Checkpoint 2
 
-- Yellow path works with a fake GPT response.
-- All GPT modifications leave an audit trail.
+- Yellow path works with a fake local review response.
+- All review modifications leave an audit trail.
 - `render` still only reads `edit_plan.json`.
 
 ## Phase 4: Red Rerank
 
 ### Task 6: Apply Red Rerank Results
 
-Description: In red mode, GPT may rebuild selected segments from a bounded candidate list.
+Description: In red mode, the reviewer may rebuild selected segments from a bounded candidate list.
 
 Acceptance criteria:
 
-- GPT can select only from top candidates in `gpt_review_packet.json`.
+- The reviewer can select only from top candidates in `gpt_review_packet.json`.
 - Result must pass source bounds, overlap, duration, and segment ID validation.
-- Invalid GPT output is rejected and the local plan is preserved.
+- Invalid review output is rejected and the local plan is preserved.
 
 Files likely touched:
 
@@ -300,24 +290,22 @@ Proposed flags:
 
 ```bash
 --review-mode off|auto|always
---review-provider openai
---review-model gpt-5.5
 --review-top-candidates 20
 ```
 
 Behavior:
 
 ```text
-off: do not run gate or GPT review
-auto: run gate; green renders directly; yellow/red may call GPT
-always: run GPT review regardless of gate status
+off: do not run gate or review
+auto: run gate; green renders directly; yellow/red may run review
+always: run review regardless of gate status
 ```
 
 Acceptance criteria:
 
 - Default behavior remains local-only and unchanged.
-- `--review-mode auto` does not call GPT when gate status is green.
-- `--review-mode auto` may call GPT for yellow/red.
+- `--review-mode auto` does not run review when gate status is green.
+- `--review-mode auto` may run review for yellow/red.
 - Review artifacts are written before render.
 
 Files likely touched:
@@ -332,45 +320,40 @@ Full intended flow:
 
 ```bash
 uv run python auto_highlight.py prepare input.mp4 --out work/video1
-uv run python auto_highlight.py analyze-visuals work/video1 --vision-model qwen2.5vl:7b
-uv run python auto_highlight.py score work/video1 --planner ollama --model qwen3:1.7b
+uv run python auto_highlight.py analyze-visuals work/video1
+uv run python auto_highlight.py score work/video1
 uv run python auto_highlight.py plan work/video1
 uv run python auto_highlight.py review-gate work/video1
 uv run python auto_highlight.py render work/video1
 ```
 
-Later, with GPT review enabled:
+Later, with review enabled:
 
 ```bash
 uv run python auto_highlight.py run input.mp4 \
   --out work/video1 \
   --visuals \
-  --vision-model qwen2.5vl:7b \
-  --planner ollama \
-  --model qwen3:1.7b \
   --review-mode auto \
-  --review-provider openai \
-  --review-model gpt-5.5
+  --review-top-candidates 20
 ```
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| GPT over-edits the plan | High | Yellow mode only allows constrained edits |
-| GPT cost grows too much | Medium | Default local-only; auto calls GPT only for yellow/red |
-| GPT returns invalid JSON | Medium | Strict parsing and schema validation |
+| Review over-edits the plan | High | Yellow mode only allows constrained edits |
+| Review work grows too much | Medium | Default local-only; auto runs review only for yellow/red |
+| Review returns invalid JSON | Medium | Strict parsing and schema validation |
 | Gate thresholds are too sensitive | Medium | Persist `triggered_rules` for tuning |
 | Review packet is too large | Medium | Send top N candidates and excerpts only |
-| Render becomes coupled to GPT | High | Keep render reading only `edit_plan.json` |
+| Render becomes coupled to review | High | Keep render reading only `edit_plan.json` |
 
 ## Open Questions
 
-- What exact API/model name should `gpt-5.5` map to?
 - Should thresholds be hardcoded first or configurable through CLI?
-- In yellow mode, can GPT shorten clip boundaries, or only replace/reorder/remove whole segments?
-- In red mode, should GPT be limited to top 20 candidates or allowed to include near misses beyond top 20?
-- Should `review-mode auto` run `review-gate` even if GPT provider is not configured, for diagnostics only?
+- In yellow mode, can the reviewer shorten clip boundaries, or only replace/reorder/remove whole segments?
+- In red mode, should the reviewer be limited to top 20 candidates or allowed to include near misses beyond top 20?
+- Should `review-mode auto` run `review-gate` even if review is not configured, for diagnostics only?
 
 ## Recommended First Implementation Slice
 
@@ -380,4 +363,4 @@ Start with Phase 1 and Phase 2 only:
 review-gate + plan_confidence.json + gpt_review_packet.json
 ```
 
-Do not connect GPT in the first slice. First verify whether the local gate labels existing videos sensibly. After that, add yellow review with a fake provider, then connect a real GPT provider.
+Do not connect any separate reviewer service in the first slice. First verify whether the local gate labels existing videos sensibly. After that, add yellow review with a fake local reviewer, then exercise the handoff flow end to end.

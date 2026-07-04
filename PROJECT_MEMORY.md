@@ -1,12 +1,12 @@
 # Project Memory
 
-Last updated: 2026-07-01
+Last updated: 2026-07-04
 
 ## Current State
 
-This repo now has a working local-first automatic highlight editor in `auto_highlight.py`.
+This repo now has a working automatic highlight editor in `auto_highlight.py`.
 The normal user flow is still Codex CLI driven: the user asks Codex to cut a video,
-and the pipeline should avoid requiring an external LLM provider API key.
+the Python pipeline stays deterministic / heuristic by default, and no local LLM or user-managed external credentials are required.
 
 Important implemented features:
 
@@ -27,7 +27,7 @@ The latest implementation round added:
 2. HTML review report generation.
 3. SRT/VTT subtitle export.
 4. `doctor` artifact freshness and validity checks.
-5. README and `project-guide.html` updates for the new workflow.
+5. README and `project-guide.html` updates for the no-local-LLM workflow.
 6. Tests covering profile candidate generation, profile score audit fields, subtitle timeline mapping, and doctor stale-report detection.
 
 Verification command used:
@@ -44,7 +44,7 @@ Result at handoff: 70 tests passing.
 - Do not commit generated media, `work/` outputs, thumbnails, transcripts, audio, or rendered videos.
 - Before reviewing a yellow/red run, run `doctor` or manually check artifact freshness.
 - If `review-gate` returns green, render directly from `edit_plan.json`; do not make extra editorial changes unless asked.
-- If `review-gate` returns yellow/red, write `codex_review_result.json`, run `apply-review`, then render only after validation passes.
+- If `review-gate` returns yellow/red, the main Codex agent (`gpt-5.5`) should review the plan, while simple side tasks can be delegated to `gpt-5.4-mini` subagents; write `codex_review_result.json`, run `apply-review`, then render only after validation passes.
 
 ## Likely Next Steps
 

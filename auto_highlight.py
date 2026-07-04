@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 from collections import Counter
 import html
 import json
@@ -15,7 +14,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib import error, request
 
 
 KEYWORDS = [
@@ -113,7 +111,6 @@ DEFAULT_RENDER_PRESET = "medium"
 DEFAULT_AUDIO_BITRATE = "128k"
 DEFAULT_FADE_DURATION = 0.25
 DEFAULT_CLIP_PADDING = 2.5
-DEFAULT_TEXT_MODEL = "qwen3:1.7b"
 PROFILE_ARTIFACT = "highlight_profile.json"
 AUTO_RENDER_PROFILES = {
     "1080p": {"output_size": "1920x1080", "video_bitrate": "6000k"},
@@ -1100,82 +1097,6 @@ def ocr_thumbnail(image_path: Path, languages: str) -> str:
     return " ".join(output.split())
 
 
-def parse_vision_response(text: str) -> dict[str, Any]:
-    try:
-        parsed = parse_first_json(text)
-    except Exception:
-        parsed = {"description": " ".join(text.split())}
-    return {
-        "description": str(parsed.get("description", "")).strip(),
-        "subjects": parsed.get("subjects", []) if isinstance(parsed.get("subjects", []), list) else [],
-        "setting": str(parsed.get("setting", "")).strip(),
-        "actions": parsed.get("actions", []) if isinstance(parsed.get("actions", []), list) else [],
-        "visual_hook": str(parsed.get("visual_hook", "")).strip(),
-        "quality_note": str(parsed.get("quality_note", "")).strip(),
-    }
-
-
-def vision_response_missing_image(parsed: dict[str, Any]) -> bool:
-    text = " ".join(
-        str(parsed.get(key, ""))
-        for key in ("description", "setting", "visual_hook", "quality_note")
-    ).lower()
-    patterns = [
-        "no image",
-        "no thumbnail",
-        "image missing",
-        "missing visual",
-        "unable to access",
-        "cannot access",
-        "cannot view",
-        "not provided",
-        "please upload",
-    ]
-    return any(pattern in text for pattern in patterns)
-
-
-def describe_thumbnail_with_ollama(image_path: Path, model: str, ollama_url: str, timeout_sec: float = 120.0) -> dict[str, Any]:
-    image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    prompt = (
-        "You are inspecting one actual video frame for highlight editing. "
-        "Use only visible evidence in the image. Describe broad visible categories such as people, water, rocks, animals, vehicles, food, signs, or buildings when present. "
-        "Use 'uncertain' only for ambiguous subjects. Do not infer sports, crowds, indoor venues, readable signs, or actions unless clearly visible. "
-        "Return JSON only with keys: description, subjects, setting, actions, visual_hook, quality_note. "
-        "Keep the description factual and concrete. Mention readable signs only if clearly visible. Do not invent text."
-    )
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
-        "stream": False,
-        "options": {"temperature": 0.1},
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        ollama_url.rstrip("/") + "/api/chat",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=timeout_sec) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        return {"error": str(exc), "description": "", "subjects": [], "setting": "", "actions": [], "visual_hook": "", "quality_note": ""}
-    content = raw.get("message", {}).get("content", "")
-    parsed = parse_vision_response(str(content))
-    if vision_response_missing_image(parsed):
-        return {
-            "error": "vision_model_did_not_receive_image",
-            "description": "",
-            "subjects": [],
-            "setting": "",
-            "actions": [],
-            "visual_hook": "",
-            "quality_note": parsed.get("quality_note", ""),
-        }
-    return parsed
-
-
 def summarize_vision_captions(captions: list[dict[str, Any]]) -> dict[str, Any]:
     descriptions = [caption.get("description", "") for caption in captions if caption.get("description")]
     subjects: list[str] = []
@@ -1258,8 +1179,6 @@ def analyze_candidate_visuals(
     candidate: dict[str, Any],
     thumbnail_count: int,
     ocr_languages: str,
-    vision_model: str,
-    ollama_url: str,
 ) -> dict[str, Any]:
     timestamps = sample_timestamps(candidate["start"], candidate["end"], thumbnail_count)
     thumbnails = []
@@ -1275,11 +1194,6 @@ def analyze_candidate_visuals(
         ocr_text = ocr_thumbnail(thumb_path, ocr_languages)
         if ocr_text:
             ocr_texts.append(ocr_text)
-        if vision_model:
-            caption = describe_thumbnail_with_ollama(thumb_path, vision_model, ollama_url)
-            caption["time"] = timestamp
-            caption["path"] = thumb_rel.as_posix()
-            vision_captions.append(caption)
 
     ocr_text = " ".join(dict.fromkeys(ocr_texts))
     ocr_hits = text_hits(ocr_text, OCR_PLACE_WORDS) if ocr_text else []
@@ -1296,8 +1210,8 @@ def analyze_candidate_visuals(
             "place_hits": ocr_hits,
         },
         "vision": {
-            "enabled": bool(vision_model),
-            "model": vision_model,
+            "enabled": False,
+            "model": "",
             "captions": vision_captions,
             "summary": summarize_vision_captions(vision_captions),
         },
@@ -1309,8 +1223,6 @@ def analyze_visuals(
     out_dir: Path,
     thumbnail_count: int = 3,
     ocr_languages: str = "chi_tra+eng",
-    vision_model: str = "",
-    ollama_url: str = "http://127.0.0.1:11434",
     output_size: str = DEFAULT_OUTPUT_SIZE,
 ) -> list[dict[str, Any]]:
     require_tool("ffmpeg")
@@ -1319,7 +1231,7 @@ def analyze_visuals(
     source_video = Path(source["source_video"])
     analysis_video = ensure_analysis_video(source_video, out_dir, output_size)
     visual_segments = [
-        analyze_candidate_visuals(analysis_video, out_dir, candidate, thumbnail_count, ocr_languages, vision_model, ollama_url)
+        analyze_candidate_visuals(analysis_video, out_dir, candidate, thumbnail_count, ocr_languages)
         for candidate in candidates
     ]
     write_json(out_dir / "visual_segments.json", visual_segments)
@@ -1965,55 +1877,6 @@ def compact_candidate_for_llm(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_ollama_chat_text(model: str, prompt: dict[str, Any], ollama_url: str = "http://127.0.0.1:11434", timeout_sec: float = 180.0) -> str:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1},
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        ollama_url.rstrip("/") + "/api/chat",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with request.urlopen(req, timeout=timeout_sec) as response:
-        raw = json.loads(response.read().decode("utf-8"))
-    return str(raw.get("message", {}).get("content", ""))
-
-
-def score_with_ollama(candidate: dict[str, Any], model: str) -> dict[str, Any]:
-    prompt = {
-        "task": "Score this highlight candidate for a short video edit. Return valid JSON only with id, summary, title, tags, scores, is_standalone, avoid_reason.",
-        "rubric": {
-            "scores": "0 to 10 for hook, fun, interaction, place, emotion, clarity",
-            "avoid_reason": "Use 'none' if usable.",
-            "notes": "Prefer moments with clear visual action, viewer reaction, animal interaction, coherent context, and standalone value. Penalize unclear, repetitive, or weak moments.",
-        },
-        "candidate": compact_candidate_for_llm(candidate),
-    }
-    output = run_ollama_chat_text(model, prompt)
-    parsed = parse_first_json(output)
-    heuristic = heuristic_scores(candidate)
-    llm_scores = normalize_llm_scores(parsed.get("scores", {}))
-    tags = string_list_value(parsed.get("tags")) or infer_tags(candidate)
-    avoid_reason = normalize_avoid_reason(parsed.get("avoid_reason", "none"))
-    return {
-        **score_with_heuristic(candidate),
-        "summary": string_value(parsed.get("summary")) or summarize_transcript(candidate["transcript"]),
-        "title": string_value(parsed.get("title")) or summarize_transcript(candidate["transcript"], max_chars=18),
-        "tags": tags,
-        "scores": llm_scores,
-        "is_standalone": bool_value(parsed.get("is_standalone"), True),
-        "avoid_reason": avoid_reason,
-        "scoring_source": "ollama",
-        "final_score": round(final_score_from_scores(heuristic, llm_scores), 3),
-    }
-
-
 def parse_first_json(text: str) -> dict[str, Any]:
     decoder = json.JSONDecoder(strict=False)
     for match in re.finditer(r"\{", text):
@@ -2026,19 +1889,8 @@ def parse_first_json(text: str) -> dict[str, Any]:
     raise ValueError("No JSON object found")
 
 
-def score_candidates(candidates: list[dict[str, Any]], planner: str, model: str) -> list[dict[str, Any]]:
-    if planner == "ollama" and shutil.which("ollama") is None:
-        log("Ollama not found; falling back to heuristic scoring.")
-        planner = "heuristic"
-    scored = []
-    for candidate in candidates:
-        if planner == "ollama":
-            try:
-                scored.append(score_with_ollama(candidate, model))
-                continue
-            except Exception as exc:  # noqa: BLE001 - fallback should keep local pipeline usable.
-                log(f"Ollama scoring failed for {candidate['id']}; using heuristic. Reason: {exc}")
-        scored.append(score_with_heuristic(candidate))
+def score_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored = [score_with_heuristic(candidate) for candidate in candidates]
     return sorted(scored, key=lambda item: item["final_score"], reverse=True)
 
 
@@ -2340,6 +2192,12 @@ def padded_segment_bounds(selected: list[dict[str, Any]], source_duration: float
     return [(round(start, 3), round(end, 3)) for start, end in bounds]
 
 
+def padded_segment_bounds_by_id(selected: list[dict[str, Any]], source_duration: float, padding: float) -> dict[str, tuple[float, float]]:
+    ordered = sorted(selected, key=lambda item: (float(item["start"]), float(item["end"]), str(item.get("id", ""))))
+    ordered_bounds = padded_segment_bounds(ordered, source_duration, padding)
+    return {str(item["id"]): bounds for item, bounds in zip(ordered, ordered_bounds)}
+
+
 def build_edit_plan(
     out_dir: Path,
     target_duration: Optional[float],
@@ -2547,9 +2405,10 @@ def scoring_fallback_ratio(scored: list[dict[str, Any]]) -> float:
     if not scored:
         return 1.0
     sources = [str(item.get("scoring_source", "")) for item in scored]
-    if "ollama" not in sources:
+    model_sources = {"codex"}
+    if not any(source in model_sources for source in sources):
         return 0.0
-    fallback_count = sum(1 for source in sources if source != "ollama")
+    fallback_count = sum(1 for source in sources if source not in model_sources)
     return fallback_count / len(scored)
 
 
@@ -2641,7 +2500,8 @@ def compute_plan_confidence(out_dir: Path) -> dict[str, Any]:
     repetition = selected_visual_repetition(selected)
     hook_score = role_confidence(plan, scored, "hook")
     ending_score = role_confidence(plan, scored, "ending")
-    plan_errors = validate_edit_plan(plan)
+    source_duration = source_duration_for_plan(out_dir, plan)
+    plan_errors = validate_edit_plan(plan, source_duration if source_duration else None)
 
     red_rules = []
     if selected_count == 0:
@@ -2765,6 +2625,7 @@ def build_gpt_review_packet(out_dir: Path, confidence: Optional[dict[str, Any]] 
             "green": "Render directly from edit_plan.json.",
             "yellow": "Review current plan. Allowed decisions: approve, reorder selected segments, replace with near miss, remove weak segment.",
             "red": "Rerank bounded candidates by writing selected_segment_ids from existing candidate IDs only.",
+            "subagents": "Use the main Codex agent (gpt-5.5) for complex editorial decisions; Codex may use gpt-5.4-mini subagents for simple bounded checks.",
             "audit": "Write codex_review_result.json with the decision and reasons.",
             "apply": "Run python3 auto_highlight.py apply-review <work-dir>; it validates the result, backs up edit_plan.json, and writes the reviewed plan.",
             "do_not": "Do not edit edit_plan.json directly before apply-review.",
@@ -2971,17 +2832,17 @@ def build_edit_plan_from_selected(
     clip_padding: float,
 ) -> dict[str, Any]:
     padding = max(0.0, clip_padding)
-    padded_bounds = [
-        (
-            round(max(0.0, float(item["start"]) - padding), 3),
-            round(min(source_duration, float(item["end"]) + padding) if source_duration else float(item["end"]) + padding, 3),
-        )
-        for item in selected
-    ]
+    if source_duration:
+        padded_bounds = padded_segment_bounds_by_id(selected, source_duration, padding)
+    else:
+        padded_bounds = {
+            str(item["id"]): (round(max(0.0, float(item["start"]) - padding), 3), round(float(item["end"]) + padding, 3))
+            for item in selected
+        }
     segments = []
     for index, item in enumerate(selected):
         role = "hook" if index == 0 else ("ending" if index == len(selected) - 1 else "highlight")
-        source_start, source_end = padded_bounds[index]
+        source_start, source_end = padded_bounds[str(item["id"])]
         segments.append(
             {
                 "segment_id": item["id"],
@@ -3601,6 +3462,23 @@ def stale_after(target: Path, dependencies: list[Path]) -> bool:
     return any(path.exists() and artifact_mtime(path) > target_mtime for path in dependencies)
 
 
+def scored_item_has_visual_coverage(item: dict[str, Any], visual_ids: set[Any]) -> bool:
+    item_id = item.get("id")
+    if item_id in visual_ids:
+        return True
+    signals = item.get("signals", {}) if isinstance(item.get("signals"), dict) else {}
+    parent_id = signals.get("parent_candidate_id")
+    if parent_id in visual_ids:
+        return True
+    if signals.get("thumbnails"):
+        return True
+    vision = signals.get("vision", {})
+    if isinstance(vision, dict) and (vision.get("captions") or vision.get("summary")):
+        return True
+    visual_quality = signals.get("visual_quality", {})
+    return isinstance(visual_quality, dict) and bool(visual_quality)
+
+
 def doctor_check(out_dir: Path) -> dict[str, Any]:
     checks = []
 
@@ -3623,7 +3501,12 @@ def doctor_check(out_dir: Path) -> dict[str, Any]:
         add("source_video", "error", f"missing: {source_video}")
     else:
         current = {"source_video": str(source_video), "fingerprint": source_fingerprint(source_video)}
-        add("source_fingerprint", "ok" if source_matches(source, current) else "error", "source video changed since prepare")
+        fingerprint_ok = source_matches(source, current)
+        add(
+            "source_fingerprint",
+            "ok" if fingerprint_ok else "error",
+            "" if fingerprint_ok else "source video changed since prepare",
+        )
 
     required = ["transcript.json", "candidates.json", "scored_segments.json", "edit_plan.json"]
     for name in required:
@@ -3659,8 +3542,12 @@ def doctor_check(out_dir: Path) -> dict[str, Any]:
     scored_path = out_dir / "scored_segments.json"
     if visual_path.exists() and scored_path.exists():
         visual_ids = {item.get("id") for item in read_json(visual_path) if isinstance(item, dict)}
-        scored_ids = {item.get("id") for item in read_json(scored_path) if isinstance(item, dict)}
-        missing_visuals = sorted(str(item) for item in scored_ids - visual_ids if item)
+        scored_items = [item for item in read_json(scored_path) if isinstance(item, dict)]
+        missing_visuals = sorted(
+            str(item.get("id"))
+            for item in scored_items
+            if item.get("id") and not scored_item_has_visual_coverage(item, visual_ids)
+        )
         if missing_visuals:
             add("visual_coverage", "warn", f"{len(missing_visuals)} scored segments lack visual metadata")
         else:
@@ -3754,7 +3641,7 @@ def command_score(args: argparse.Namespace) -> None:
     project_focus = infer_project_focus(candidates)
     write_json(out_dir / "project_focus.json", project_focus)
     candidates = attach_focus_signals(candidates, project_focus)
-    scored = apply_profile_scoring(score_candidates(candidates, args.planner, args.model), profile)
+    scored = apply_profile_scoring(score_candidates(candidates), profile)
     write_json(out_dir / "scored_segments.json", scored)
     write_project_summary(out_dir, target_duration)
     log(f"Wrote {len(scored)} scored segments to {out_dir / 'scored_segments.json'}")
@@ -3765,8 +3652,6 @@ def command_analyze_visuals(args: argparse.Namespace) -> None:
         Path(args.work_dir),
         args.thumbnail_count,
         args.ocr_languages,
-        args.vision_model,
-        args.ollama_url,
         args.output_size,
     )
     log(f"Wrote visual metadata for {len(visual_segments)} candidates to {Path(args.work_dir) / 'visual_segments.json'}")
@@ -3878,15 +3763,11 @@ def command_run(args: argparse.Namespace) -> None:
                 work_dir=args.out,
                 thumbnail_count=args.thumbnail_count,
                 ocr_languages=args.ocr_languages,
-                vision_model=args.vision_model,
-                ollama_url=args.ollama_url,
                 output_size=args.output_size,
             )
         )
     score_args = argparse.Namespace(
         work_dir=args.out,
-        planner=args.planner,
-        model=args.model,
         target_duration=args.target_duration,
         retention_ratio=args.retention_ratio,
     )
@@ -3940,8 +3821,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     score = subparsers.add_parser("score", help="Score candidate segments")
     score.add_argument("work_dir", help="Work directory")
-    score.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    score.add_argument("--model", default=DEFAULT_TEXT_MODEL, help="Ollama model")
     score.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     score.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
     score.set_defaults(func=command_score)
@@ -3950,8 +3829,6 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_visuals_parser.add_argument("work_dir", help="Work directory")
     analyze_visuals_parser.add_argument("--thumbnail-count", type=int, default=3)
     analyze_visuals_parser.add_argument("--ocr-languages", default="chi_tra+eng")
-    analyze_visuals_parser.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
-    analyze_visuals_parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     analyze_visuals_parser.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Analysis proxy maximum size as WIDTHxHEIGHT")
     analyze_visuals_parser.set_defaults(func=command_analyze_visuals)
 
@@ -4011,8 +3888,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--out", required=True, help="Work directory")
     run.add_argument("--target-duration", type=float, default=None, help="Explicit soft target duration in seconds; defaults to source duration times retention ratio")
     run.add_argument("--retention-ratio", type=float, default=DEFAULT_TARGET_RETENTION_RATIO, help="Default soft target as a fraction of source duration")
-    run.add_argument("--planner", choices=["heuristic", "ollama"], default="heuristic")
-    run.add_argument("--model", default=DEFAULT_TEXT_MODEL, help="Ollama model")
     run.add_argument("--whisper-model", default="small", help="faster-whisper model name or path")
     run.add_argument("--force", action="store_true", help="Clear generated artifacts and regenerate in an existing work directory")
     run.add_argument("--profile", choices=sorted(BUILTIN_PROFILES), default="default", help="Built-in highlight style profile")
@@ -4020,8 +3895,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--visuals", action="store_true", help="Analyze thumbnails and optional OCR before scoring")
     run.add_argument("--thumbnail-count", type=int, default=3)
     run.add_argument("--ocr-languages", default="chi_tra+eng")
-    run.add_argument("--vision-model", default="", help="Optional Ollama vision model for thumbnail descriptions")
-    run.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     run.add_argument("--output-size", type=output_size_arg, default=DEFAULT_OUTPUT_SIZE, help="Maximum render size as WIDTHxHEIGHT")
     run.add_argument("--crf", type=crf_arg, default=DEFAULT_RENDER_CRF, help="x264 CRF, lower is higher quality/larger files")
     run.add_argument("--preset", default=DEFAULT_RENDER_PRESET, help="x264 preset such as medium, slow, or veryfast")
@@ -4031,7 +3904,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--quality-mode", choices=["manual", "auto"], default="manual", help="Use fixed render settings or infer 1080p/1440p/4K from selected clip quality")
     run.add_argument("--clip-padding", type=float, default=DEFAULT_CLIP_PADDING, help="Seconds to add before and after each selected segment")
     run.add_argument("--selection-mode", choices=["duration", "content-first"], default="duration", help="Select by duration target or by strongest content first")
-    run.add_argument("--review-mode", choices=["off", "auto", "always"], default="off", help="Run Scheme C confidence gate before render")
+    run.add_argument("--review-mode", choices=["off", "auto", "always"], default="auto", help="Run Scheme C confidence gate before render")
     run.add_argument("--review-top-candidates", type=int, default=20, help="Number of top scored candidates to include in the Codex review packet")
     run.set_defaults(func=command_run)
 
