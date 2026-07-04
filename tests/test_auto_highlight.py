@@ -1527,6 +1527,31 @@ class AutoHighlightTests(unittest.TestCase):
         self.assertIn("3500k", args)
         self.assertNotIn("-crf", args)
 
+    def test_render_writes_output_inside_current_work_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out_dir = root / "current"
+            stale_dir = root / "stale"
+            out_dir.mkdir()
+            source_video = root / "source.mp4"
+            source_video.write_bytes(b"video")
+            ah.write_json(
+                out_dir / "edit_plan.json",
+                {
+                    "source_video": str(source_video),
+                    "output_video": str(stale_dir / "output" / "highlight.mp4"),
+                    "selected_segments": [{"source_start": 0, "source_end": 1}],
+                },
+            )
+            settings = ah.RenderSettings(output_size="640x360", crf=35, preset="veryfast", audio_bitrate="96k")
+
+            with mock.patch.object(ah, "require_tool"), mock.patch.object(ah, "run_command") as run_command:
+                ah.render_edit_plan(out_dir, settings)
+
+            concat_command = run_command.call_args_list[-1].args[0]
+
+        self.assertEqual(Path(concat_command[-1]), out_dir / "output" / "highlight.mp4")
+
     def test_output_size_arg_rejects_invalid_size(self):
         with self.assertRaises(Exception):
             ah.output_size_arg("vertical")

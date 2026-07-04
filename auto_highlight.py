@@ -3601,7 +3601,7 @@ def render_edit_plan(out_dir: Path, settings: RenderSettings) -> None:
         raise SystemExit("edit_plan.json has no selected_segments to render.")
     concat_lines = [f"file '{clip.resolve().as_posix()}'" for clip in clip_paths]
     concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
-    output_video = Path(plan["output_video"])
+    output_video = out_dir / "output" / "highlight.mp4"
     output_video.parent.mkdir(parents=True, exist_ok=True)
     run_command(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_path), "-c", "copy", str(output_video)])
 
